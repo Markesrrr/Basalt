@@ -14,6 +14,36 @@
   <link rel="stylesheet" href="/src/styles/layout.css" />
   <link rel="stylesheet" href="/src/styles/components.css" />
   <link rel="stylesheet" href="/src/styles/refresh.css" />
+  <script>
+    (function () {
+      var r = document.documentElement;
+      r.classList.add("is-hydrating");
+      try {
+        var q = new URLSearchParams(window.location.search);
+        var th = (q.get("theme") || "").toLowerCase();
+        if (["dark", "ember", "light", "spruce", "cobalt", "nether", "frost", "sculk", "end", "cherry"].indexOf(th) >= 0) {
+          r.setAttribute("data-theme", th);
+        }
+        var ly = (q.get("layout") || "").toLowerCase();
+        var map = {
+          sidebar: "sidebar",
+          topbar: "topbar",
+          compact: "compact-deck",
+          "compact-deck": "compact-deck",
+          right: "right-rail",
+          "right-rail": "right-rail",
+          minimal: "minimal-rail",
+          "minimal-rail": "minimal-rail",
+          dock: "minimal-rail",
+          deck: "deck",
+          "deck-mode": "deck",
+          steamdeck: "deck",
+        };
+        if (map[ly]) r.setAttribute("data-layout", map[ly]);
+      } catch (_) {}
+      setTimeout(function () { r.classList.remove("is-hydrating"); }, 350);
+    })();
+  </script>
   <script type="module" src="/src/ts/main.ts"></script>
 </head>
 <body>

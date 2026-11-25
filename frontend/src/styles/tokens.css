@@ -210,6 +210,9 @@
   --elev-2: inset 0 1px 0 var(--edge-highlight), 0 10px 26px rgba(20, 24, 30, 0.10), 0 2px 6px rgba(20, 24, 30, 0.06);
   --elev-3: 0 24px 60px rgba(20, 24, 30, 0.18), 0 6px 18px rgba(20, 24, 30, 0.10);
   --stage-top: color-mix(in srgb, var(--accent) 10%, var(--bg-canvas));
+  --col-back: color-mix(in srgb, var(--text) 10%, var(--bg-surface));
+  --col-front: color-mix(in srgb, var(--text) 6%, var(--bg-rail));
+  --col-cap: color-mix(in srgb, var(--text) 19%, var(--bg-surface-alt));
 
   --brand-left: #8c867a;
   --brand-right: #6d675d;
@@ -354,6 +357,9 @@
   --elev-2: inset 0 1px 0 var(--edge-highlight), 0 10px 26px rgba(20, 24, 30, 0.10), 0 2px 6px rgba(20, 24, 30, 0.06);
   --elev-3: 0 24px 60px rgba(20, 24, 30, 0.18), 0 6px 18px rgba(20, 24, 30, 0.10);
   --stage-top: color-mix(in srgb, var(--accent) 10%, var(--bg-canvas));
+  --col-back: color-mix(in srgb, var(--text) 10%, var(--bg-surface));
+  --col-front: color-mix(in srgb, var(--text) 6%, var(--bg-rail));
+  --col-cap: color-mix(in srgb, var(--text) 19%, var(--bg-surface-alt));
 
   --brand-left: #7e8da1;
   --brand-right: #5e6d82;
@@ -463,6 +469,9 @@
   --elev-2: inset 0 1px 0 var(--edge-highlight), 0 10px 26px rgba(20, 24, 30, 0.10), 0 2px 6px rgba(20, 24, 30, 0.06);
   --elev-3: 0 24px 60px rgba(20, 24, 30, 0.18), 0 6px 18px rgba(20, 24, 30, 0.10);
   --stage-top: color-mix(in srgb, var(--accent) 10%, var(--bg-canvas));
+  --col-back: color-mix(in srgb, var(--text) 10%, var(--bg-surface));
+  --col-front: color-mix(in srgb, var(--text) 6%, var(--bg-rail));
+  --col-cap: color-mix(in srgb, var(--text) 19%, var(--bg-surface-alt));
 
   --brand-left: #967785;
   --brand-right: #765966;

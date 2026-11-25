@@ -179,6 +179,8 @@ const serverChecks = new Map<string, ServerCheckState>();
 let consoleModeActive = false;
 let consoleAudioMuted = false;
 let lastDesktopLayout: LayoutMode = "Sidebar";
+let prevAppliedTheme: ThemeMode | null = null;
+let prevAppliedLayout: LayoutMode | null = null;
 let deckCards: DeckCard[] = [];
 let selectedDeckIdx = 0;
 let deckClockTimer: number | null = null;
@@ -451,10 +453,30 @@ function applyPreferences(): void {
   }
   const sounds = getEffectiveSounds();
 
+  const themeChanged = prevAppliedTheme !== null && prevAppliedTheme !== theme;
+  const layoutChanged = prevAppliedLayout !== null && prevAppliedLayout !== layout;
+  const instantSwitch = themeChanged || layoutChanged || document.documentElement.classList.contains("is-hydrating");
+  if (instantSwitch) {
+    document.documentElement.classList.add("theme-switching");
+  }
+  if (layoutChanged) {
+    document.getElementById("nav-indicator")?.classList.remove("is-ready");
+  }
+
   setSoundsEnabled(sounds);
   document.documentElement.setAttribute("data-theme", THEME_ATTRS[theme] ?? "dark");
   document.documentElement.setAttribute("data-layout", LAYOUT_ATTRS[layout] ?? "sidebar");
   applyDynamicDesignTokens(theme, accent, customHex, corner);
+  prevAppliedTheme = theme;
+  prevAppliedLayout = layout;
+  if (instantSwitch) {
+    void document.documentElement.offsetWidth;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        document.documentElement.classList.remove("theme-switching");
+      });
+    });
+  }
   document.body.classList.toggle("compact", state.config.ui_compact);
   syncRootMotionAttribute(state.config.ui_reduced_motion);
   const reducedMotion = getEffectiveMotion() === "none";
@@ -4330,6 +4352,13 @@ async function init(): Promise<void> {
   try {
     state = await ipc.getBootstrapState();
     renderAll();
+    if (currentActiveViewId() === "library") {
+      if (libActiveTab === "installed") {
+        void loadLibraryInstalled();
+      } else {
+        void loadLibraryCatalog(false);
+      }
+    }
   } catch (err) {
     setActiveView("play", false, false);
     setBanner(
@@ -4337,6 +4366,10 @@ async function init(): Promise<void> {
       tr(getEffectiveLanguage(), "err.bootstrap", { err: errorMessage(err) }),
       "error"
     );
+  } finally {
+    void document.documentElement.offsetWidth;
+    document.documentElement.classList.remove("is-hydrating");
+    syncNavIndicator();
   }
 
   await ipc.onLaunchLog((payload) => {
