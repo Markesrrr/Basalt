@@ -309,7 +309,7 @@ function computeOfflineUuidPreview(username: string): string {
   return `${p1}-${p2}-${p3}-${p4}-${p5}`;
 }
 
-function setSelectNumericValue(select: HTMLSelectElement, targetValue: number): void {
+function setSelectNumericValue(select: HTMLSelectElement, targetValue: number, unit: "MB" | "FPS" = "MB"): void {
   const lang = getEffectiveLanguage();
   const strVal = String(targetValue);
   for (const existing of Array.from(select.querySelectorAll('option[data-synthetic="true"]'))) {
@@ -326,7 +326,11 @@ function setSelectNumericValue(select: HTMLSelectElement, targetValue: number): 
     const opt = document.createElement("option");
     opt.value = strVal;
     opt.dataset.synthetic = "true";
-    opt.textContent = `${targetValue} MB (${tr(lang, "system.ramRecommended", { mb: targetValue }).replace(`${targetValue} MB `, "").replace(/^\(|\)$/g, "")})`;
+    if (unit === "FPS") {
+      opt.textContent = targetValue >= 260 ? tr(lang, "system.fpsUnlimited") : `${targetValue} FPS`;
+    } else {
+      opt.textContent = `${targetValue} MB (${tr(lang, "system.ramRecommended", { mb: targetValue }).replace(`${targetValue} MB `, "").replace(/^\(|\)$/g, "")})`;
+    }
     select.appendChild(opt);
   }
   select.value = strVal;
@@ -2003,7 +2007,7 @@ function renderSystemView(): void {
   const gfx = config.graphics;
   byId<HTMLSpanElement>("gfx-preset-badge").textContent = tr(
     lang,
-    gfx.auto_configured ? "system.presetAuto" : "system.presetManual",
+    gfx.auto_configured && gfx.preset !== "Custom" ? "system.presetAuto" : "system.presetManual",
     { preset: gfx.preset }
   );
 
@@ -2016,9 +2020,9 @@ function renderSystemView(): void {
   byId<HTMLInputElement>("gfx-fov").value = String(gfx.fov_degrees);
   byId<HTMLOutputElement>("gfx-fov-out").textContent = `${gfx.fov_degrees}°`;
 
-  setSelectNumericValue(byId<HTMLSelectElement>("gfx-jvm-ram"), gfx.jvm_ram_mb);
+  setSelectNumericValue(byId<HTMLSelectElement>("gfx-jvm-ram"), gfx.jvm_ram_mb, "MB");
   byId<HTMLSelectElement>("gfx-jvm-gc").value = gfx.jvm_gc;
-  byId<HTMLSelectElement>("gfx-max-fps").value = String(gfx.max_fps);
+  setSelectNumericValue(byId<HTMLSelectElement>("gfx-max-fps"), gfx.max_fps, "FPS");
   byId<HTMLInputElement>("gfx-vsync").checked = gfx.vsync;
   byId<HTMLInputElement>("gfx-fancy").checked = gfx.fancy_graphics;
   byId<HTMLInputElement>("gfx-ao").checked = gfx.smooth_lighting;
@@ -3108,14 +3112,14 @@ async function handleSaveGraphics(e: SubmitEvent): Promise<void> {
     simulation_distance: Number(byId<HTMLInputElement>("gfx-sim-dist").value) || 10,
     fov_degrees: Number(byId<HTMLInputElement>("gfx-fov").value) || 75,
     vsync: byId<HTMLInputElement>("gfx-vsync").checked,
-    max_fps: Number(byId<HTMLSelectElement>("gfx-max-fps").value) || 120,
+    max_fps: Number(byId<HTMLSelectElement>("gfx-max-fps").value) || 260,
     mouse_sensitivity: state.config.graphics.mouse_sensitivity,
     smooth_lighting: byId<HTMLInputElement>("gfx-ao").checked,
     fancy_graphics: byId<HTMLInputElement>("gfx-fancy").checked,
     jvm_ram_mb: Number(byId<HTMLSelectElement>("gfx-jvm-ram").value) || 2048,
     jvm_gc: byId<HTMLSelectElement>("gfx-jvm-gc").value === "ZGC" ? "ZGC" : "G1GC",
     show_fps_hud: state.config.graphics.show_fps_hud,
-    auto_configured: false,
+    auto_configured: true,
   };
 
   try {
@@ -4460,6 +4464,14 @@ async function init(): Promise<void> {
     renderLibraryView();
     renderWorldsView();
     renderSystemView();
+    if (payload.kind === "launch") {
+      void ipc.getBootstrapState().then((fresh) => {
+        if (!state) return;
+        state.config = fresh.config;
+        renderPlayView();
+        renderSystemView();
+      }).catch(() => undefined);
+    }
 
     const lang = getEffectiveLanguage();
     const feedback = byId<HTMLDivElement>("launch-feedback");

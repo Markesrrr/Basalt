@@ -10,7 +10,8 @@ use basalt::config::{
 };
 use basalt::hardware::{GpuTier, HardwareProfile};
 use basalt::options_txt::{
-    fov_degrees_to_options_value, sync_minecraft_options, sync_minecraft_options_with_pack,
+    ensure_launch_options, fov_degrees_to_options_value, read_minecraft_options_into,
+    sync_minecraft_options, sync_minecraft_options_with_pack,
 };
 use basalt::protocol::{
     LocalHandshakeResult, MINECRAFT_1_21_4_PROTOCOL, PacketBuffer, local_player_uuid_dashed,
@@ -149,6 +150,44 @@ fn options_txt_sync_preserves_custom_lines() {
     sync_minecraft_options_with_pack(&tmp_dir, &gfx, Some(&pack_entry)).unwrap();
     let packed = fs::read_to_string(tmp_dir.join("options.txt")).unwrap();
     assert!(packed.contains("resourcePacks:[\"vanilla\",\"programmer_art\",\"file/basalt_skin.zip\"]\n"));
+
+    // ensure_launch_options MUST preserve existing user VSync / FPS / FOV / RenderDistance edits!
+    fs::write(
+        tmp_dir.join("options.txt"),
+        "lang:tr_tr\nenableVsync:false\nmaxFps:260\nrenderDistance:20\nsimulationDistance:14\nfov:0.5000\nao:false\ngraphicsMode:0\nresourcePacks:[\"vanilla\"]\n",
+    )
+    .unwrap();
+    let conflicting_launcher_gfx = GraphicsSettings {
+        vsync: true,
+        max_fps: 60,
+        render_distance: 6,
+        simulation_distance: 6,
+        fov_degrees: 70.0,
+        smooth_lighting: true,
+        fancy_graphics: true,
+        ..Default::default()
+    };
+    ensure_launch_options(&tmp_dir, &conflicting_launcher_gfx, Some(&pack_entry)).unwrap();
+    let preserved = fs::read_to_string(tmp_dir.join("options.txt")).unwrap();
+    assert!(preserved.contains("enableVsync:false\n"));
+    assert!(preserved.contains("maxFps:260\n"));
+    assert!(preserved.contains("renderDistance:20\n"));
+    assert!(preserved.contains("simulationDistance:14\n"));
+    assert!(preserved.contains("fov:0.5000\n"));
+    assert!(preserved.contains("ao:false\n"));
+    assert!(preserved.contains("graphicsMode:0\n"));
+    assert!(preserved.contains("skipMultiplayerWarning:true\n"));
+    assert!(preserved.contains("resourcePacks:[\"vanilla\",\"file/basalt_skin.zip\"]\n"));
+
+    let mut imported = conflicting_launcher_gfx.clone();
+    assert!(read_minecraft_options_into(&tmp_dir, &mut imported));
+    assert!(!imported.vsync);
+    assert_eq!(imported.max_fps, 260);
+    assert_eq!(imported.render_distance, 20);
+    assert_eq!(imported.simulation_distance, 14);
+    assert!((imported.fov_degrees - 90.0).abs() < 0.5);
+    assert!(!imported.smooth_lighting);
+    assert!(!imported.fancy_graphics);
 
     let _ = fs::remove_dir_all(&tmp_dir);
 }

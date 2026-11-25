@@ -33,7 +33,9 @@ use basalt::modrinth::{
     count_library_items, delete_library_item, import_library_file, install_modrinth_project,
     install_shader_preset_bundle, list_library_items, search_modrinth, toggle_library_item,
 };
-use basalt::options_txt::{sync_minecraft_options, sync_minecraft_options_with_pack};
+use basalt::options_txt::{
+    ensure_launch_options, read_minecraft_options_into, sync_minecraft_options,
+};
 use basalt::protocol::{
     LocalHandshakeResult, ServerPingInfo, ping_server_1_21_4, probe_local_dev_login_1_21_4,
 };
@@ -232,13 +234,15 @@ impl AppState {
             .map_err(|e| format!("Failed to create Minecraft saves directory: {e}"))?;
         migrate_legacy_client_gradle_saves(&paths.root_dir, &saves_dir);
 
+        let first_run = !paths.config_file.exists();
         let mut config = AppConfig::load(&paths.config_file);
         let hardware = HardwareProfile::detect_headless();
         let mut hardware_notice = None;
 
-        if !config.graphics.auto_configured {
+        if first_run {
             let (recommended, reason) = hardware.recommend_settings(&config.graphics);
             config.graphics = recommended;
+            read_minecraft_options_into(&run_dir, &mut config.graphics);
             if let Err(err) = config.save(&paths.config_file) {
                 hardware_notice = Some(format!(
                     "{reason} (Warning: failed to save initial calibration to disk: {err})"
@@ -246,6 +250,8 @@ impl AppState {
             } else {
                 hardware_notice = Some(reason);
             }
+        } else if read_minecraft_options_into(&run_dir, &mut config.graphics) {
+            let _ = config.save(&paths.config_file);
         }
 
         if let Some(ref skin_path) = config.skin_file
@@ -549,11 +555,16 @@ fn monitor_vanilla_child_blocking(
 
 #[tauri::command]
 fn get_bootstrap_state(state: tauri::State<AppState>) -> Result<BootstrapDto, String> {
-    let config = state
-        .config
-        .lock()
-        .map_err(|_| "Failed to unlock configuration".to_string())?
-        .clone();
+    let config = {
+        let mut guard = state
+            .config
+            .lock()
+            .map_err(|_| "Failed to unlock configuration".to_string())?;
+        if read_minecraft_options_into(&state.run_dir, &mut guard.graphics) {
+            let _ = guard.save(&state.paths.config_file);
+        }
+        guard.clone()
+    };
     let hardware = state
         .hardware
         .lock()
@@ -1344,12 +1355,18 @@ fn auto_optimize_graphics(state: tauri::State<AppState>) -> Result<OptimizeResul
             .config
             .lock()
             .map_err(|_| "Failed to unlock configuration".to_string())?;
-        let (recommended, reason) = hardware.recommend_settings(&config.graphics);
+        let (mut recommended, reason) = hardware.recommend_settings(&config.graphics);
+        let options_path = state.run_dir().join("options.txt");
+        if options_path.is_file() {
+            read_minecraft_options_into(&state.run_dir(), &mut recommended);
+        }
         config.graphics = recommended.clone();
         config.save(&state.paths.config_file)?;
         (recommended, reason)
     };
-    let _ = sync_minecraft_options(&state.run_dir(), &recommended);
+    if !state.run_dir().join("options.txt").is_file() {
+        let _ = sync_minecraft_options(&state.run_dir(), &recommended);
+    }
 
     Ok(OptimizeResultDto {
         graphics: recommended,
@@ -2095,7 +2112,7 @@ fn launch_client(
     )?;
 
     let pack_entry = format!("file/{BASALT_SKIN_PACK_NAME}");
-    sync_minecraft_options_with_pack(&state.run_dir, &config_snapshot.graphics, Some(&pack_entry))?;
+    ensure_launch_options(&state.run_dir, &config_snapshot.graphics, Some(&pack_entry))?;
 
     let session = RunningSessionDto {
         pid: std::process::id(),
@@ -2235,6 +2252,12 @@ fn launch_client(
         };
 
         finish_running_session(&running_arc);
+        if let Some(app_state) = app.try_state::<AppState>()
+            && let Ok(mut guard) = app_state.config.lock()
+            && read_minecraft_options_into(&run_dir, &mut guard.graphics)
+        {
+            let _ = guard.save(&app_state.paths.config_file);
+        }
         spawn_discord_sync(
             discord_arc,
             discord_enabled,

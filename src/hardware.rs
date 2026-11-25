@@ -136,7 +136,7 @@ impl HardwareProfile {
 
     /// Computes balanced Minecraft 1.21.4 + JVM parameters based on actual detected hardware.
     pub fn recommend_settings(&self, current: &GraphicsSettings) -> (GraphicsSettings, String) {
-        let (preset, render_distance, simulation_distance, smooth_lighting, fancy_graphics, max_fps, target_ram, jvm_gc, reason) =
+        let (preset, render_distance, simulation_distance, smooth_lighting, fancy_graphics, target_ram, jvm_gc, reason) =
             match self.gpu_device_type {
                 GpuTier::Discrete if self.total_ram_mb >= 12_000 && self.logical_cores >= 8 => {
                     let ram = self.safe_jvm_ram_mb(4096);
@@ -146,7 +146,6 @@ impl HardwareProfile {
                         12,
                         true,
                         true,
-                        240,
                         ram,
                         JvmGcMode::ZGC,
                         format!(
@@ -166,7 +165,6 @@ impl HardwareProfile {
                         10,
                         true,
                         true,
-                        165,
                         ram,
                         JvmGcMode::G1GC,
                         format!(
@@ -183,7 +181,6 @@ impl HardwareProfile {
                         8,
                         true,
                         true,
-                        120,
                         ram,
                         JvmGcMode::G1GC,
                         format!(
@@ -200,7 +197,6 @@ impl HardwareProfile {
                         6,
                         false,
                         false,
-                        60,
                         ram,
                         JvmGcMode::G1GC,
                         format!(
@@ -218,8 +214,8 @@ impl HardwareProfile {
             render_distance,
             simulation_distance,
             fov_degrees: current.fov_degrees,
-            vsync: current.vsync,
-            max_fps,
+            vsync: false,
+            max_fps: 260,
             mouse_sensitivity: current.mouse_sensitivity,
             smooth_lighting,
             fancy_graphics,
@@ -242,7 +238,6 @@ impl HardwareProfile {
                 fancy_graphics: false,
                 jvm_ram_mb: self.safe_jvm_ram_mb(1536),
                 jvm_gc: JvmGcMode::G1GC,
-                max_fps: 60,
                 ..current.clone()
             },
             GraphicsPreset::Medium => GraphicsSettings {
@@ -253,7 +248,6 @@ impl HardwareProfile {
                 fancy_graphics: true,
                 jvm_ram_mb: self.safe_jvm_ram_mb(2560),
                 jvm_gc: JvmGcMode::G1GC,
-                max_fps: 120,
                 ..current.clone()
             },
             GraphicsPreset::High => GraphicsSettings {
@@ -264,7 +258,6 @@ impl HardwareProfile {
                 fancy_graphics: true,
                 jvm_ram_mb: self.safe_jvm_ram_mb(3072),
                 jvm_gc: JvmGcMode::G1GC,
-                max_fps: 165,
                 ..current.clone()
             },
             GraphicsPreset::Ultra => GraphicsSettings {
@@ -275,7 +268,6 @@ impl HardwareProfile {
                 fancy_graphics: true,
                 jvm_ram_mb: self.safe_jvm_ram_mb(4096),
                 jvm_gc: JvmGcMode::ZGC,
-                max_fps: 240,
                 ..current.clone()
             },
             GraphicsPreset::Custom => current.clone(),

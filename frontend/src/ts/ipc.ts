@@ -111,8 +111,8 @@ const previewState: BootstrapDto = {
       render_distance: 16,
       simulation_distance: 12,
       fov_degrees: 75,
-      vsync: true,
-      max_fps: 240,
+      vsync: false,
+      max_fps: 260,
       mouse_sensitivity: 0.5,
       smooth_lighting: true,
       fancy_graphics: true,
@@ -821,7 +821,8 @@ export async function autoOptimizeGraphics(): Promise<OptimizeResultDto> {
     simulation_distance: 12,
     jvm_ram_mb: 4096,
     jvm_gc: "ZGC",
-    max_fps: 240,
+    vsync: false,
+    max_fps: 260,
     auto_configured: true,
   };
   previewState.config.graphics = gfx;
