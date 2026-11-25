@@ -522,7 +522,19 @@ function syncNavIndicator(): void {
   requestAnimationFrame(() => ind.classList.add("is-ready"));
 }
 
+function clearSearchParam(param: string): void {
+  const url = new URL(window.location.href);
+  if (url.searchParams.has(param)) {
+    url.searchParams.delete(param);
+    window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }
+}
+
 function setActiveView(view: ViewId, updateHash = true, withSound = false): void {
+  const delDlg = document.getElementById("delete-world-dialog");
+  if (delDlg instanceof HTMLDialogElement && delDlg.open) {
+    delDlg.close();
+  }
   let changed = false;
   const navButtons = document.querySelectorAll<HTMLButtonElement>(".nav-btn[data-nav]");
   for (const btn of Array.from(navButtons)) {
@@ -4113,6 +4125,7 @@ function wireEvents(): void {
     btn.addEventListener("click", () => {
       const choice = btn.dataset.themeChoice as ThemeMode | undefined;
       if (choice && THEME_ORDER.includes(choice)) {
+        clearSearchParam("theme");
         void saveAccessibilityPrefs({ theme: choice });
       }
     });
@@ -4122,6 +4135,7 @@ function wireEvents(): void {
     btn.addEventListener("click", () => {
       const choice = btn.dataset.layoutChoice as LayoutMode | undefined;
       if (!choice || !LAYOUT_ORDER.includes(choice)) return;
+      clearSearchParam("layout");
       if (choice === "DeckMode") {
         enterConsoleMode();
         return;
@@ -4140,6 +4154,7 @@ function wireEvents(): void {
     btn.addEventListener("click", () => {
       const choice = btn.dataset.accentChoice as AccentTone | undefined;
       if (choice && ACCENT_ORDER.includes(choice)) {
+        clearSearchParam("accent");
         void saveAccessibilityPrefs({ ui_accent: choice });
       }
     });
@@ -4149,6 +4164,7 @@ function wireEvents(): void {
     btn.addEventListener("click", () => {
       const choice = btn.dataset.cornerChoice as CornerStyle | undefined;
       if (choice && CORNER_ORDER.includes(choice)) {
+        clearSearchParam("corner");
         void saveAccessibilityPrefs({ ui_corner: choice });
       }
     });
