@@ -266,3 +266,114 @@ export function wireRovingTabGroup(
     }
   });
 }
+
+const slidingGroupSyncers: Array<() => void> = [];
+
+/**
+ * Re-align every registered sliding-pill indicator (after view switches, resize,
+ * i18n text updates, or preference hydration).
+ */
+export function syncSlidingIndicators(): void {
+  for (const sync of slidingGroupSyncers) {
+    sync();
+  }
+}
+
+/**
+ * Attaches an animated, sticky sliding-pill background indicator to a segmented control
+ * or tab bar without shifting layout. Snaps cleanly without an initial fly-in from (0, 0)
+ * when a hidden container becomes visible, and glides smoothly on interactive changes.
+ */
+export function wireSlidingGroup(
+  container: HTMLElement,
+  activeSelector = ".active, [aria-selected='true'], [aria-pressed='true']"
+): () => void {
+  container.classList.add("has-glider");
+  let glider = container.querySelector<HTMLSpanElement>(":scope > .seg-glider");
+  if (!glider) {
+    glider = document.createElement("span");
+    glider.className = "seg-glider";
+    glider.setAttribute("aria-hidden", "true");
+    container.prepend(glider);
+  }
+
+  let rafId = 0;
+
+  const sync = (): void => {
+    const active = container.querySelector<HTMLElement>(activeSelector);
+    if (!active || active.offsetWidth === 0 || active.offsetHeight === 0 || container.offsetParent === null) {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+      glider.classList.remove("is-ready", "is-positioned");
+      delete glider.dataset.positioned;
+      return;
+    }
+
+    const x = active.offsetLeft;
+    const y = active.offsetTop;
+    const w = active.offsetWidth;
+    const h = active.offsetHeight;
+    const firstPlacement = glider.dataset.positioned !== "1";
+
+    glider.style.setProperty("--gx", `${x}px`);
+    glider.style.setProperty("--gy", `${y}px`);
+    glider.style.setProperty("--gw", `${w}px`);
+    glider.style.setProperty("--gh", `${h}px`);
+
+    if (firstPlacement) {
+      glider.classList.remove("is-ready");
+      glider.classList.add("is-positioned");
+      void glider.offsetWidth;
+      glider.dataset.positioned = "1";
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
+        if (glider.dataset.positioned === "1") {
+          glider.classList.add("is-ready");
+        }
+      });
+    } else {
+      glider.classList.add("is-positioned", "is-ready");
+    }
+  };
+
+  slidingGroupSyncers.push(sync);
+  if (typeof ResizeObserver !== "undefined") {
+    const ro = new ResizeObserver(() => sync());
+    ro.observe(container);
+    for (const child of Array.from(container.children)) {
+      if (child !== glider && child instanceof HTMLElement) {
+        ro.observe(child);
+      }
+    }
+  }
+  sync();
+  return sync;
+}
+
+/**
+ * Crisp compositor text swap used when the selected hero target/title changes.
+ */
+export function animateTextSwap(
+  el: HTMLElement,
+  preference: EffectiveMotion
+): void {
+  if (preference === "none") {
+    cancelElementAnimation(el);
+    return;
+  }
+  void animateElement(
+    el,
+    [
+      { opacity: 0.35, transform: "translateY(6px)" },
+      { opacity: 1, transform: "translateY(0)" },
+    ],
+    {
+      duration: 195,
+      easing: EASE_ENTER,
+    },
+    preference
+  );
+}

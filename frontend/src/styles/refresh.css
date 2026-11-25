@@ -14,11 +14,35 @@
 :root.is-hydrating *::before,
 :root.is-hydrating *::after,
 :root.is-hydrating .nav-indicator.is-ready,
+:root.is-hydrating .seg-glider.is-ready,
 :root.theme-switching *,
 :root.theme-switching *::before,
 :root.theme-switching *::after,
-:root.theme-switching .nav-indicator.is-ready {
+:root.theme-switching .nav-indicator.is-ready,
+:root.theme-switching .seg-glider.is-ready {
   transition: none;
+}
+
+:root {
+  --kin-glide: 260ms;
+  --kin-ease-spring: cubic-bezier(0.22, 1.15, 0.36, 1);
+  --kin-ease-thumb: cubic-bezier(0.34, 1.42, 0.64, 1);
+}
+
+:root[data-motion="subtle"] {
+  --kin-glide: 175ms;
+  --kin-ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --kin-ease-thumb: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root[data-motion="none"] {
+  --kin-glide: 0ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --kin-glide: 0ms;
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -340,8 +364,26 @@ main {
   animation-delay: calc(var(--i) * 16ms);
 }
 
+@keyframes strata-pulse {
+  0% {
+    transform: translateY(0);
+  }
+  42% {
+    transform: translateY(-5px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+:root:not([data-motion="none"]) .stage-strata.is-pulsing .strata-col {
+  animation: strata-pulse 420ms var(--kin-ease-enter) both;
+  animation-delay: calc(var(--i) * 12ms);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .stage-strata.is-entering .strata-col {
+  .stage-strata.is-entering .strata-col,
+  .stage-strata.is-pulsing .strata-col {
     animation: none;
   }
 }
@@ -880,6 +922,154 @@ main {
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, white 26%, transparent),
     0 2px 8px -2px var(--accent-glow);
+}
+
+/* Sticky / Magnetic Sliding-Pill Gliders */
+.has-glider {
+  position: relative;
+  isolation: isolate;
+}
+
+.has-glider > button,
+.has-glider > .loader-pill,
+.has-glider > .lib-tab,
+.has-glider > .installed-sub-tab,
+.has-glider > .seg-btn,
+.has-glider > .settings-tab {
+  position: relative;
+  z-index: 1;
+  transition:
+    color var(--kin-hover) ease,
+    background-color var(--kin-hover) ease,
+    transform var(--kin-press) var(--kin-ease-control);
+}
+
+.has-glider > button:active:not(:disabled),
+.has-glider > .loader-pill:active:not(:disabled),
+.has-glider > .lib-tab:active:not(:disabled),
+.has-glider > .installed-sub-tab:active:not(:disabled),
+.has-glider > .seg-btn:active:not(:disabled),
+.has-glider > .settings-tab:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.seg-glider {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  width: var(--gw, 0px);
+  height: var(--gh, 0px);
+  transform: translate3d(var(--gx, 0px), var(--gy, 0px), 0);
+  border-radius: var(--radius-pill);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 100%, white 8%), var(--accent));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 26%, transparent),
+    0 2px 10px -2px var(--accent-glow);
+  will-change: transform, width, height;
+}
+
+.seg-glider.is-positioned {
+  opacity: 1;
+}
+
+.seg-glider.is-ready {
+  transition:
+    transform var(--kin-glide) var(--kin-ease-spring),
+    width var(--kin-glide) var(--kin-ease-spring),
+    height var(--kin-glide) var(--kin-ease-spring);
+}
+
+.settings-nav-bar > .seg-glider {
+  background: var(--bg-surface);
+  box-shadow:
+    var(--elev-1),
+    inset 0 0 0 1px color-mix(in srgb, var(--hairline-strong) 80%, transparent);
+}
+
+.has-glider:has(> .seg-glider.is-positioned) > .loader-pill.active,
+.has-glider:has(> .seg-glider.is-positioned) > .lib-tab.active,
+.has-glider:has(> .seg-glider.is-positioned) > .installed-sub-tab.active,
+.has-glider:has(> .seg-glider.is-positioned) > .seg-btn.active,
+.has-glider:has(> .seg-glider.is-positioned) > .seg-btn[aria-pressed="true"],
+.has-glider:has(> .seg-glider.is-positioned) > .lang-pill-btn.active,
+.has-glider:has(> .seg-glider.is-positioned) > .settings-tab.active {
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-motion="none"] .seg-glider.is-ready,
+:root[data-motion="none"] .has-glider > button,
+:root[data-motion="none"] input[type="checkbox"].switch,
+:root[data-motion="none"] input[type="checkbox"].switch::after,
+:root[data-motion="none"] .btn-launch-verify .ico,
+:root[data-motion="none"] .stage-tile,
+:root[data-motion="none"] .choice-tile,
+:root[data-motion="none"] .accent-chip,
+:root[data-motion="none"] .world-card,
+:root[data-motion="none"] .catalog-card {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seg-glider.is-ready,
+  .has-glider > button,
+  input[type="checkbox"].switch,
+  input[type="checkbox"].switch::after,
+  .btn-launch-verify .ico,
+  .stage-tile,
+  .choice-tile,
+  .accent-chip,
+  .world-card,
+  .catalog-card {
+    transition: none;
+  }
+}
+
+/* Tactile Switches, Tiles & Action Micro-Feedback */
+input[type="checkbox"].switch {
+  transition:
+    background-color var(--kin-select) ease,
+    border-color var(--kin-select) ease;
+}
+
+input[type="checkbox"].switch::after {
+  transition:
+    transform 220ms var(--kin-ease-thumb),
+    width 130ms var(--kin-ease-control),
+    background-color var(--kin-hover) ease;
+}
+
+input[type="checkbox"].switch:active:not(:disabled)::after {
+  width: 1.24rem;
+}
+
+.btn-launch-verify .ico {
+  transition: transform 240ms var(--kin-ease-control);
+}
+
+.btn-launch-verify:hover:not(:disabled) .ico {
+  transform: rotate(90deg);
+}
+
+.stage-tile,
+.choice-tile,
+.accent-chip,
+.world-card,
+.catalog-card {
+  transition:
+    transform var(--kin-hover) var(--kin-ease-control),
+    border-color var(--kin-hover) ease,
+    background-color var(--kin-hover) ease,
+    box-shadow var(--kin-hover) ease;
+}
+
+.choice-tile:active:not(:disabled),
+.accent-chip:active:not(:disabled),
+.stage-tile:active:not(:disabled) {
+  transform: scale(0.985);
 }
 
 .library-tabs,

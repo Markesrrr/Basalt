@@ -21,14 +21,17 @@ import {
 import * as ipc from "./ipc";
 import {
   animateDialogOpen,
+  animateTextSwap,
   animateToastIn,
   animateViewHandoff,
   cancelElementAnimation,
   resolveEffectiveMotion,
   syncRootMotionAttribute,
+  syncSlidingIndicators,
   watchSystemMotion,
   wireDetailsAccordion,
   wireRovingTabGroup,
+  wireSlidingGroup,
   type EffectiveMotion,
 } from "./motion";
 import {
@@ -38,7 +41,7 @@ import {
 } from "./skin_canvas";
 import { Skin3DViewer } from "./skin3d";
 import { initMinecraftSounds, playMcSound, setSoundsEnabled, unlockAudioContext } from "./sounds";
-import { renderStrata, seedHue } from "./stage_art";
+import { pulseStrata, renderStrata, seedHue } from "./stage_art";
 import {
   type AccentTone,
   type BootstrapDto,
@@ -503,6 +506,7 @@ function applyPreferences(): void {
   syncDeckClock(isDeck);
   syncDeckGamepadLoop(isDeck);
   syncNavIndicator();
+  syncSlidingIndicators();
 }
 
 function syncNavIndicator(): void {
@@ -587,6 +591,7 @@ function setActiveView(view: ViewId, updateHash = true, withSound = false): void
     playMcSound("tab");
   }
   syncNavIndicator();
+  syncSlidingIndicators();
 }
 
 function readInitialViewFromHash(): ViewId {
@@ -650,6 +655,7 @@ function syncVersionUi(): void {
     settingsVerSelect.value = ver;
     settingsVerSelect.disabled = state.running_session !== null;
   }
+  syncSlidingIndicators();
 }
 
 function renderTopbarAndSession(): void {
@@ -866,6 +872,8 @@ function renderRailTargets(): void {
   }
 }
 
+let lastPlayTargetKey = "";
+
 function renderPlayView(): void {
   if (!state) return;
   const strata = document.getElementById("stage-strata");
@@ -883,8 +891,13 @@ function renderPlayView(): void {
     config.last_save_id = activeSaveId;
   }
 
-  byId<HTMLHeadingElement>("play-world-title").textContent =
-    activeSaveId ?? tr(lang, "play.mainMenuTitle");
+  const titleEl = byId<HTMLHeadingElement>("play-world-title");
+  titleEl.textContent = activeSaveId ?? tr(lang, "play.mainMenuTitle");
+  const nextTargetKey = `${activeSaveId ?? "__title__"}::${config.mc_version || "1.21.4"}::${config.mod_loader}`;
+  if (lastPlayTargetKey !== "" && lastPlayTargetKey !== nextTargetKey) {
+    animateTextSwap(titleEl, getEffectiveMotion());
+  }
+  lastPlayTargetKey = nextTargetKey;
 
   const targetSub = document.getElementById("play-target-sub");
   if (targetSub) {
@@ -1768,6 +1781,7 @@ function renderProfileView(): void {
         for (const b of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-skin-view]"))) {
           b.classList.toggle("active", b.dataset.skinView === next);
         }
+        syncSlidingIndicators();
       },
     });
   }
@@ -1788,6 +1802,7 @@ function renderProfileView(): void {
   for (const btn of Array.from(viewBtns)) {
     btn.classList.toggle("active", btn.dataset.skinView === skinViewMode);
   }
+  syncSlidingIndicators();
 }
 
 function renderVanillaStatus(vanilla: VanillaEnvStatus): void {
@@ -2077,6 +2092,7 @@ function syncLibraryControls(): void {
         : tr(lang, "library.tabMods");
     searchInput.placeholder = tr(lang, "library.searchPlaceholder", { kind: kindLabel });
   }
+  syncSlidingIndicators();
 
   const isInstalledTab = libActiveTab === "installed";
   const kitGrid = document.getElementById("library-kit-grid");
@@ -2361,6 +2377,8 @@ async function handleLoaderChange(loader: LoaderKind): Promise<void> {
     renderTopbarAndSession();
     renderPlayView();
     renderLibraryView();
+    const strata = document.getElementById("stage-strata");
+    if (strata instanceof SVGSVGElement) pulseStrata(strata);
     showToast(tr(getEffectiveLanguage(), "loader.switchedToast", { loader }), "success");
   } catch (err) {
     if (seq !== loaderSwitchSeq) return;
@@ -2575,6 +2593,8 @@ async function handleVersionChange(version: string): Promise<void> {
     renderLibraryView();
     renderProfileView();
     renderSystemView();
+    const strata = document.getElementById("stage-strata");
+    if (strata instanceof SVGSVGElement) pulseStrata(strata);
     showToast(
       tr(getEffectiveLanguage(), "system.versionChangedToast", {
         ver: state.config.mc_version,
@@ -3890,9 +3910,16 @@ function wireEvents(): void {
     btn.addEventListener("click", () => {
       const tab = btn.dataset.libTab as LibraryKind | "installed" | undefined;
       if (!tab || tab === libActiveTab) return;
+      const wasInstalled = libActiveTab === "installed";
       playMcSound("tab");
       libActiveTab = tab;
       renderLibraryView();
+      const targetPanel = document.getElementById(
+        tab === "installed" ? "library-installed-panel" : "library-catalog-grid"
+      );
+      if (targetPanel && (wasInstalled || tab === "installed")) {
+        animateViewHandoff(targetPanel, getEffectiveMotion());
+      }
       if (tab === "installed") {
         void loadLibraryInstalled();
       } else {
@@ -4217,10 +4244,17 @@ function wireEvents(): void {
   for (const btn of Array.from(skinModeBtns)) {
     btn.addEventListener("click", () => {
       const mode = btn.dataset.skinView as SkinViewMode | undefined;
-      if (mode && state) {
+      if (mode && state && mode !== skinViewMode) {
+        const prevMode = skinViewMode;
         skinViewMode = mode;
         playMcSound("click");
         renderProfileView();
+        if (prevMode === "atlas" || mode === "atlas") {
+          const previewEl = document.getElementById(
+            mode === "atlas" ? "skin-atlas-canvas" : "skin-preview-canvas"
+          );
+          if (previewEl) animateViewHandoff(previewEl, getEffectiveMotion());
+        }
       }
     });
   }
@@ -4300,8 +4334,15 @@ function wireEvents(): void {
     }
     for (const panel of settingsPanels) {
       const active = panel.dataset.settingsPanel === tabId;
+      const wasHidden = panel.hidden;
       panel.hidden = !active;
+      if (active && wasHidden) {
+        animateViewHandoff(panel, getEffectiveMotion());
+      } else if (!active) {
+        cancelElementAnimation(panel);
+      }
     }
+    syncSlidingIndicators();
   };
   for (const btn of settingsTabs) {
     btn.addEventListener("click", () => {
@@ -4314,6 +4355,18 @@ function wireEvents(): void {
   }
   if (settingsTabBar) {
     wireRovingTabGroup(settingsTabBar, "[data-settings-tab]");
+  }
+
+  // Sliding sticky-pill gliders + roving keyboard groups for every segmented option bar
+  for (const bar of Array.from(
+    document.querySelectorAll<HTMLElement>(
+      ".loader-seg, .library-tabs, .library-installed-filters, .corner-seg, .skin-view-modes, .settings-nav-bar"
+    )
+  )) {
+    wireSlidingGroup(bar);
+    if (bar !== settingsTabBar) {
+      wireRovingTabGroup(bar, "button");
+    }
   }
 
   // Kinetic WebUI: accordions, roving tab groups, OS reduced-motion & window lifecycle
@@ -4329,7 +4382,10 @@ function wireEvents(): void {
       new ResizeObserver(() => syncNavIndicator()).observe(navContainer);
     }
   }
-  window.addEventListener("resize", syncNavIndicator);
+  window.addEventListener("resize", () => {
+    syncNavIndicator();
+    syncSlidingIndicators();
+  });
 
   const palette = initCommandPalette({
     getCommands: buildPaletteCommands,

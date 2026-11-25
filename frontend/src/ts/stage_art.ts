@@ -77,3 +77,22 @@ export function renderStrata(svg: SVGSVGElement): void {
     svg.classList.remove("is-entering");
   }, 1400);
 }
+
+let strataPulseTimer = 0;
+
+/**
+ * Triggers a subtle basalt column wave pulse when switching mod loader or MC version.
+ */
+export function pulseStrata(svg: SVGSVGElement): void {
+  if (svg.classList.contains("is-entering")) return;
+  svg.classList.remove("is-pulsing");
+  void svg.getBoundingClientRect();
+  svg.classList.add("is-pulsing");
+  if (strataPulseTimer) {
+    window.clearTimeout(strataPulseTimer);
+  }
+  strataPulseTimer = window.setTimeout(() => {
+    svg.classList.remove("is-pulsing");
+    strataPulseTimer = 0;
+  }, 560);
+}
