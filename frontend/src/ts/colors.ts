@@ -258,8 +258,8 @@ export function applyDynamicDesignTokens(
     { sm: string; md: string; btn: string; pill: string }
   > = {
     Sharp: { sm: "0.22rem", md: "0.45rem", btn: "0.28rem", pill: "0.35rem" },
-    Balanced: { sm: "0.5rem", md: "0.82rem", btn: "0.52rem", pill: "9999px" },
-    Soft: { sm: "0.75rem", md: "1.1rem", btn: "0.82rem", pill: "9999px" },
+    Balanced: { sm: "0.55rem", md: "1rem", btn: "0.62rem", pill: "9999px" },
+    Soft: { sm: "0.8rem", md: "1.35rem", btn: "0.95rem", pill: "9999px" },
   };
   const rad = radiusMap[corner] ?? radiusMap.Balanced;
   root.style.setProperty("--radius-sm", rad.sm);

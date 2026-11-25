@@ -1,4 +1,5 @@
 import { applyDynamicDesignTokens, normalizeHex } from "./colors";
+import { initCommandPalette, type PaletteCommand } from "./command_palette";
 import {
   compareLocaleStrings,
   formatLocaleBytes,
@@ -37,6 +38,7 @@ import {
 } from "./skin_canvas";
 import { Skin3DViewer } from "./skin3d";
 import { initMinecraftSounds, playMcSound, setSoundsEnabled, unlockAudioContext } from "./sounds";
+import { renderStrata, seedHue } from "./stage_art";
 import {
   type AccentTone,
   type BootstrapDto,
@@ -478,6 +480,24 @@ function applyPreferences(): void {
   byId<HTMLElement>("console-home").hidden = !isDeck;
   syncDeckClock(isDeck);
   syncDeckGamepadLoop(isDeck);
+  syncNavIndicator();
+}
+
+function syncNavIndicator(): void {
+  const nav = document.querySelector<HTMLElement>("aside.rail .nav");
+  const ind = document.getElementById("nav-indicator");
+  const active = nav?.querySelector<HTMLElement>(".nav-btn.active") ?? null;
+  if (!nav || !ind || !active || getEffectiveLayout() === "DeckMode" || active.offsetWidth === 0) {
+    nav?.classList.remove("has-indicator");
+    ind?.classList.remove("is-ready");
+    return;
+  }
+  ind.style.setProperty("--ind-x", `${active.offsetLeft}px`);
+  ind.style.setProperty("--ind-y", `${active.offsetTop}px`);
+  ind.style.setProperty("--ind-w", `${active.offsetWidth}px`);
+  ind.style.setProperty("--ind-h", `${active.offsetHeight}px`);
+  nav.classList.add("has-indicator");
+  requestAnimationFrame(() => ind.classList.add("is-ready"));
 }
 
 function setActiveView(view: ViewId, updateHash = true, withSound = false): void {
@@ -532,6 +552,7 @@ function setActiveView(view: ViewId, updateHash = true, withSound = false): void
   if (withSound && changed) {
     playMcSound("tab");
   }
+  syncNavIndicator();
 }
 
 function readInitialViewFromHash(): ViewId {
@@ -572,6 +593,9 @@ function syncVersionUi(): void {
 
   const launchHeroVer = document.getElementById("launch-version-hero");
   if (launchHeroVer) launchHeroVer.textContent = `${ver} · ${loader}`;
+
+  const stageKicker = document.getElementById("stage-kicker");
+  if (stageKicker) stageKicker.textContent = `${loader.toUpperCase()} · ${ver}`;
 
   const loaderPills = document.querySelectorAll<HTMLButtonElement>(".loader-pill[data-loader]");
   for (const btn of Array.from(loaderPills)) {
@@ -660,6 +684,7 @@ function renderTopbarAndSession(): void {
     recheckJavaBtn.disabled = true;
     sysInstallJavaBtn.disabled = true;
     sysRecheckJavaBtn.disabled = true;
+    launchBtn.dataset.state = isPrepare || isJavaInstall ? "busy" : "playing";
     launchLabel.textContent = tr(
       lang,
       isJavaInstall ? "btn.installingJava" : isPrepare ? "btn.building" : "btn.mcRunning"
@@ -675,6 +700,7 @@ function renderTopbarAndSession(): void {
       pill.setAttribute("data-state", "warning");
       pill.textContent = tr(lang, "pill.javaRequired");
       launchBtn.disabled = true;
+      launchBtn.dataset.state = "blocked";
       prepareBtn.disabled = true;
       openMcBtn.disabled = true;
       launchLabel.textContent = tr(lang, "btn.installJavaFirst");
@@ -685,6 +711,7 @@ function renderTopbarAndSession(): void {
       pill.setAttribute("data-state", "idle");
       pill.textContent = tr(lang, cacheReady ? "pill.ready" : "pill.awaitFirstBuild");
       launchBtn.disabled = false;
+      launchBtn.dataset.state = "ready";
       prepareBtn.disabled = false;
       openMcBtn.disabled = false;
       launchLabel.textContent = tr(
@@ -807,6 +834,10 @@ function renderRailTargets(): void {
 
 function renderPlayView(): void {
   if (!state) return;
+  const strata = document.getElementById("stage-strata");
+  if (strata instanceof SVGSVGElement) {
+    renderStrata(strata);
+  }
   const lang = getEffectiveLanguage();
   const { config, saves, hardware, vanilla } = state;
   const cacheReady = vanilla.client_ready && vanilla.assets_ready;
@@ -972,6 +1003,13 @@ function renderPlayView(): void {
       const row = document.createElement("div");
       row.className = item.isSelected ? "recent-jump-row is-active" : "recent-jump-row";
       row.setAttribute("role", "listitem");
+      row.dataset.kind = item.kind;
+      row.style.setProperty("--tile-hue", String(seedHue(item.saveId ?? item.serverAddr ?? item.title)));
+
+      const art = document.createElement("div");
+      art.className = "recent-jump-art";
+      art.setAttribute("aria-hidden", "true");
+      art.innerHTML = `<svg class="ico"><use href="#${item.kind === "world" ? "ico-cube" : "ico-server"}" /></svg>`;
 
       const copy = document.createElement("div");
       copy.className = "recent-jump-copy";
@@ -1011,7 +1049,7 @@ function renderPlayView(): void {
         }
       });
 
-      row.append(copy, actionBtn);
+      row.append(art, copy, actionBtn);
       recentList.appendChild(row);
     }
   }
@@ -1541,6 +1579,7 @@ function renderWorldsView(): void {
     const row = document.createElement("div");
     row.className = isActive ? "world-row is-active" : "world-row";
     row.setAttribute("role", "listitem");
+    row.style.setProperty("--tile-hue", String(seedHue(save.id)));
 
     const iconWrap = document.createElement("div");
     iconWrap.className = "world-row-icon";
@@ -3518,6 +3557,168 @@ function wireWindowControls(): void {
   });
 }
 
+function buildPaletteCommands(query: string): PaletteCommand[] {
+  if (!state) return [];
+  const lang = getEffectiveLanguage();
+  const launchBlocked = state.running_session !== null || !state.vanilla.java_ready;
+  const cmds: PaletteCommand[] = [];
+
+  const pagesGroup = tr(lang, "cmdk.groupPages");
+  const pageIcons: Record<ViewId, string> = {
+    play: "ico-play",
+    library: "ico-cube",
+    worlds: "ico-layers",
+    profile: "ico-user",
+    system: "ico-sliders",
+  };
+  for (const v of VIEW_ORDER) {
+    cmds.push({
+      id: `page-${v}`,
+      group: pagesGroup,
+      label: tr(lang, `view.${v}`),
+      icon: pageIcons[v],
+      run: () => setActiveView(v, true, true),
+    });
+  }
+
+  const actionsGroup = tr(lang, "cmdk.groupActions");
+  const launchBtnEl = byId<HTMLButtonElement>("btn-launch-client");
+  const prepareBtnEl = byId<HTMLButtonElement>("btn-prepare-gradle");
+  const themeBtnEl = byId<HTMLButtonElement>("btn-rail-theme");
+  const soundBtnEl = byId<HTMLButtonElement>("btn-rail-sound");
+  const deckBtnEl = byId<HTMLButtonElement>("btn-enter-deck");
+  const installJavaBtnEl = byId<HTMLButtonElement>("btn-install-java");
+  const optimizeBtnEl = byId<HTMLButtonElement>("btn-auto-optimize");
+
+  cmds.push(
+    {
+      id: "act-launch",
+      group: actionsGroup,
+      label: byId<HTMLSpanElement>("launch-btn-label").textContent ?? tr(lang, "btn.launchMc"),
+      icon: "ico-play",
+      disabled: launchBtnEl.disabled,
+      run: () => launchBtnEl.click(),
+    },
+    {
+      id: "act-verify",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionVerify"),
+      icon: "ico-refresh",
+      disabled: prepareBtnEl.disabled,
+      run: () => prepareBtnEl.click(),
+    },
+    {
+      id: "act-gamedir",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionGameDir"),
+      icon: "ico-folder",
+      run: () => void handleOpenGameFolder(),
+    },
+    {
+      id: "act-theme",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionTheme"),
+      icon: "ico-theme",
+      disabled: themeBtnEl.disabled,
+      run: () => themeBtnEl.click(),
+    },
+    {
+      id: "act-sound",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionSound"),
+      icon: "ico-sound",
+      disabled: soundBtnEl.disabled,
+      run: () => soundBtnEl.click(),
+    },
+    {
+      id: "act-console",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionConsole"),
+      icon: "ico-gamepad",
+      disabled: deckBtnEl.disabled,
+      run: () => deckBtnEl.click(),
+    }
+  );
+
+  if (!state.vanilla.java_ready) {
+    cmds.push({
+      id: "act-java",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionJava"),
+      icon: "ico-bolt",
+      disabled: installJavaBtnEl.disabled,
+      run: () => installJavaBtnEl.click(),
+    });
+  }
+
+  cmds.push({
+    id: "act-optimize",
+    group: actionsGroup,
+    label: tr(lang, "cmdk.actionOptimize"),
+    icon: "ico-sliders",
+    disabled: optimizeBtnEl.disabled,
+    run: () => optimizeBtnEl.click(),
+  });
+
+  const worldsGroup = tr(lang, "cmdk.groupWorlds");
+  cmds.push({
+    id: "world-title",
+    group: worldsGroup,
+    label: tr(lang, "cmdk.titleScreen"),
+    hint: tr(lang, "cmdk.hintLaunch"),
+    icon: "ico-play",
+    disabled: launchBlocked,
+    run: () => void handleLaunchClient("title", null, null),
+  });
+  for (const save of state.saves) {
+    cmds.push({
+      id: `world-${save.id}`,
+      group: worldsGroup,
+      label: save.id,
+      hint: tr(lang, "cmdk.hintLaunch"),
+      icon: "ico-cube",
+      disabled: launchBlocked,
+      run: () => void handleLaunchClient("singleplayer", save.id, null),
+    });
+  }
+
+  const serversGroup = tr(lang, "cmdk.groupServers");
+  for (const srv of state.config.saved_servers) {
+    cmds.push({
+      id: `srv-${srv.address}`,
+      group: serversGroup,
+      label: srv.name,
+      hint: srv.address,
+      keywords: `${srv.address} ${tr(lang, "cmdk.hintConnect")}`,
+      icon: "ico-server",
+      disabled: launchBlocked,
+      run: () => void handleLaunchClient("multiplayer", null, srv.address),
+    });
+  }
+
+  const q = query.trim();
+  if (q.length >= 2) {
+    cmds.push({
+      id: "modrinth-search",
+      group: tr(lang, "cmdk.groupModrinth"),
+      label: tr(lang, "cmdk.searchModrinth", { q }),
+      keywords: q,
+      icon: "ico-search",
+      run: () => {
+        setActiveView("library", true, true);
+        if (libActiveTab === "installed") {
+          document.querySelector<HTMLButtonElement>('.lib-tab[data-lib-tab="mod"]')?.click();
+        }
+        const searchInput = byId<HTMLInputElement>("library-search-input");
+        searchInput.value = q;
+        byId<HTMLButtonElement>("btn-library-search").click();
+      },
+    });
+  }
+
+  return cmds;
+}
+
 function wireEvents(): void {
   wireWindowControls();
   const unlockOnce = () => unlockAudioContext();
@@ -4086,7 +4287,25 @@ function wireEvents(): void {
   const navContainer = document.querySelector<HTMLElement>("aside.rail .nav");
   if (navContainer) {
     wireRovingTabGroup(navContainer, ".nav-btn[data-nav]");
+    if (typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => syncNavIndicator()).observe(navContainer);
+    }
   }
+  window.addEventListener("resize", syncNavIndicator);
+
+  const palette = initCommandPalette({
+    getCommands: buildPaletteCommands,
+    locale: () => LANG_INTL_LOCALE[getEffectiveLanguage()],
+    isBlocked: () => getEffectiveLayout() === "DeckMode" || !state,
+    motion: getEffectiveMotion,
+  });
+  document.getElementById("btn-open-cmdk")?.addEventListener("click", () => palette.open());
+  window.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      palette.open();
+    }
+  });
   for (const group of Array.from(document.querySelectorAll<HTMLElement>(".seg-control"))) {
     wireRovingTabGroup(group, ".seg-btn");
   }

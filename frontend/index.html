@@ -13,6 +13,7 @@
   <link rel="stylesheet" href="/src/styles/base.css" />
   <link rel="stylesheet" href="/src/styles/layout.css" />
   <link rel="stylesheet" href="/src/styles/components.css" />
+  <link rel="stylesheet" href="/src/styles/refresh.css" />
   <script type="module" src="/src/ts/main.ts"></script>
 </head>
 <body>
@@ -108,6 +109,16 @@
       <polyline points="4 7.5 12 12 20 7.5" />
       <line x1="12" y1="12" x2="12" y2="21" />
     </symbol>
+    <symbol id="ico-search" viewBox="0 0 24 24">
+      <circle cx="11" cy="11" r="6.5" />
+      <line x1="16" y1="16" x2="20.5" y2="20.5" />
+    </symbol>
+    <symbol id="ico-server" viewBox="0 0 24 24">
+      <rect x="4" y="4" width="16" height="7" rx="1.5" />
+      <rect x="4" y="13" width="16" height="7" rx="1.5" />
+      <line x1="8" y1="7.5" x2="8.01" y2="7.5" />
+      <line x1="8" y1="16.5" x2="8.01" y2="16.5" />
+    </symbol>
   </svg>
 
   <a class="skip-link" href="#main-content" data-i18n="skip.main">Skip to content</a>
@@ -152,6 +163,7 @@
 
       <p class="rail-label" data-i18n="nav.menuLabel">MENU</p>
       <nav class="nav" aria-label="Sections" data-i18n-aria="nav.sectionsAria">
+        <span class="nav-indicator" id="nav-indicator" aria-hidden="true"></span>
         <span class="deck-shoulder" aria-hidden="true">L1</span>
         <button class="nav-btn active" type="button" data-nav="play" aria-current="page" data-i18n-title="nav.play">
           <svg class="ico" aria-hidden="true"><use href="#ico-play" /></svg>
@@ -279,6 +291,12 @@
           <strong id="topbar-crumb">Play</strong>
         </div>
 
+        <button class="cmdk-trigger" type="button" id="btn-open-cmdk" aria-haspopup="dialog" aria-keyshortcuts="Control+K" title="Quick search (Ctrl+K)" data-i18n-title="cmdk.triggerTitle">
+          <svg class="ico small" aria-hidden="true"><use href="#ico-search" /></svg>
+          <span class="cmdk-trigger-label" data-i18n="cmdk.trigger">Search worlds, mods, settings…</span>
+          <kbd class="cmdk-kbd">Ctrl K</kbd>
+        </button>
+
         <div class="topbar-meta">
           <span class="preview-badge" id="preview-mode-badge" data-i18n="topbar.previewBadge" hidden>
             Preview (sample data)
@@ -368,146 +386,151 @@
             </div>
           </div>
 
-          <div class="play-workbench" id="world-stage">
-            <div class="play-main-col">
-              <div class="play-launch-card" aria-label="Launch controls" data-i18n-aria="play.controlsAria">
-                <div class="play-launch-head">
-                  <div class="play-target-copy">
-                    <h2 class="selected-world-title" id="play-world-title">Minecraft Title Screen</h2>
-                    <span class="play-target-sub tabular" id="play-target-sub">Main menu · Minecraft 1.21.4</span>
-                  </div>
-                  <button class="btn-secondary btn-sm" type="button" id="btn-goto-worlds" data-i18n="play.manageSaves">
-                    Manage saves
-                  </button>
-                </div>
+          <div class="play-workbench stage-layout" id="world-stage">
+            <section class="stage-hero" aria-label="Launch controls" data-i18n-aria="play.controlsAria">
+              <svg class="stage-strata" id="stage-strata" viewBox="0 0 1200 320" preserveAspectRatio="xMidYMax slice" aria-hidden="true" focusable="false"></svg>
+              <div class="stage-hero-grid">
+                <div class="stage-copy">
+                  <p class="stage-kicker tabular" id="stage-kicker">VANILLA · 1.21.4</p>
+                  <h2 class="stage-title" id="play-world-title">Minecraft Title Screen</h2>
+                  <span class="stage-sub tabular" id="play-target-sub">Main menu · Minecraft 1.21.4</span>
 
-                <div class="field-row-3">
-                  <div class="field-group">
-                    <label for="play-version-select" data-i18n="play.versionSelectLabel">Minecraft version</label>
-                    <select id="play-version-select">
-                      <option value="1.21.4" data-i18n="version.latestOption">1.21.4 (Latest)</option>
-                      <option value="1.21.3">1.21.3</option>
-                      <option value="1.21.2">1.21.2</option>
-                      <option value="1.21.1">1.21.1</option>
-                      <option value="1.21">1.21</option>
-                      <option value="1.20.6">1.20.6</option>
-                      <option value="1.20.4">1.20.4</option>
-                      <option value="1.20.2">1.20.2</option>
-                      <option value="1.20.1">1.20.1</option>
-                      <option value="1.20">1.20</option>
-                      <option value="1.19.4">1.19.4</option>
-                      <option value="1.19.2">1.19.2</option>
-                      <option value="1.18.2">1.18.2</option>
-                      <option value="1.17.1">1.17.1</option>
-                      <option value="1.16.5">1.16.5</option>
-                    </select>
-                  </div>
+                  <div class="stage-config">
+                    <div class="stage-loader" role="group" aria-label="Mod Loader" data-i18n-aria="loader.label">
+                      <span class="stage-label" data-i18n="loader.label">Mod Loader</span>
+                      <div class="loader-seg">
+                        <button class="loader-pill active" type="button" data-loader="Vanilla" data-i18n="loader.Vanilla">Vanilla</button>
+                        <button class="loader-pill" type="button" data-loader="Fabric" data-i18n="loader.Fabric">Fabric</button>
+                        <button class="loader-pill" type="button" data-loader="Forge" data-i18n="loader.Forge">Forge</button>
+                      </div>
+                    </div>
 
-                  <div class="field-group">
-                    <label for="play-save-select" data-i18n="play.quickPlayLabel">Quick entry</label>
-                    <select id="play-save-select"></select>
-                  </div>
+                    <div class="stage-fields">
+                      <div class="field-group">
+                        <label for="play-version-select" data-i18n="play.versionSelectLabel">Minecraft version</label>
+                        <select id="play-version-select">
+                          <option value="1.21.4" data-i18n="version.latestOption">1.21.4 (Latest)</option>
+                          <option value="1.21.3">1.21.3</option>
+                          <option value="1.21.2">1.21.2</option>
+                          <option value="1.21.1">1.21.1</option>
+                          <option value="1.21">1.21</option>
+                          <option value="1.20.6">1.20.6</option>
+                          <option value="1.20.4">1.20.4</option>
+                          <option value="1.20.2">1.20.2</option>
+                          <option value="1.20.1">1.20.1</option>
+                          <option value="1.20">1.20</option>
+                          <option value="1.19.4">1.19.4</option>
+                          <option value="1.19.2">1.19.2</option>
+                          <option value="1.18.2">1.18.2</option>
+                          <option value="1.17.1">1.17.1</option>
+                          <option value="1.16.5">1.16.5</option>
+                        </select>
+                      </div>
 
-                  <div class="field-group">
-                    <label for="play-username" data-i18n="play.usernameLabel">Player name (offline)</label>
-                    <input
-                      id="play-username"
-                      type="text"
-                      maxlength="16"
-                      autocomplete="off"
-                      aria-describedby="play-username-error"
-                      placeholder="e.g. Player"
-                      data-i18n-placeholder="play.usernamePlaceholder"
-                    />
-                    <span class="field-hint" id="play-username-error" role="alert" hidden></span>
-                  </div>
-                </div>
+                      <div class="field-group">
+                        <label for="play-save-select" data-i18n="play.quickPlayLabel">Quick entry</label>
+                        <select id="play-save-select"></select>
+                      </div>
 
-                <div class="loader-switcher-bar" role="group" aria-label="Mod Loader" data-i18n-aria="loader.label">
-                  <div class="loader-switcher-left">
-                    <span class="loader-bar-label" data-i18n="loader.label">Mod Loader</span>
-                    <div class="loader-seg">
-                      <button class="loader-pill active" type="button" data-loader="Vanilla" data-i18n="loader.Vanilla">Vanilla</button>
-                      <button class="loader-pill" type="button" data-loader="Fabric" data-i18n="loader.Fabric">Fabric</button>
-                      <button class="loader-pill" type="button" data-loader="Forge" data-i18n="loader.Forge">Forge</button>
+                      <div class="field-group">
+                        <label for="play-username" data-i18n="play.usernameLabel">Player name (offline)</label>
+                        <input
+                          id="play-username"
+                          type="text"
+                          maxlength="16"
+                          autocomplete="off"
+                          aria-describedby="play-username-error"
+                          placeholder="e.g. Player"
+                          data-i18n-placeholder="play.usernamePlaceholder"
+                        />
+                        <span class="field-hint" id="play-username-error" role="alert" hidden></span>
+                      </div>
                     </div>
                   </div>
-                  <div class="loader-switcher-right">
+
+                  <div class="java-setup-card" id="java-setup-panel" role="region" aria-labelledby="java-setup-title" hidden>
+                    <div class="java-setup-head">
+                      <span class="java-setup-title" id="java-setup-title" data-i18n="play.javaSetupTitle">Java 21 JDK Required</span>
+                      <span class="row-tag">TEMURIN JDK 21</span>
+                    </div>
+                    <p class="java-setup-desc" id="java-setup-desc" data-i18n="play.javaSetupDesc">
+                      No Java 21 JDK was detected on this PC. Install official Eclipse Temurin 21 into Basalt's runtime directory without administrator rights.
+                    </p>
+                    <div class="java-setup-actions">
+                      <button class="btn-primary btn-sm" type="button" id="btn-install-java" data-i18n="play.installJavaBtn">
+                        Auto-Install Java 21
+                      </button>
+                      <button class="btn-secondary btn-sm" type="button" id="btn-recheck-java" data-i18n="play.recheckJavaBtn">
+                        Rescan
+                      </button>
+                      <button class="btn-secondary btn-sm" type="button" id="btn-open-java-site" data-i18n="play.openJavaSiteBtn">
+                        Official Site
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="launch-action-block stage-actions">
+                    <div class="launch-action-row">
+                      <button class="btn-primary btn-launch" type="button" id="btn-launch-client">
+                        <svg class="ico fill" aria-hidden="true"><use href="#ico-play" /></svg>
+                        <span id="launch-btn-label">Launch Minecraft</span>
+                        <svg class="ico chevron" aria-hidden="true"><use href="#ico-chevron" /></svg>
+                      </button>
+                      <button
+                        class="btn-secondary btn-launch-verify"
+                        type="button"
+                        id="btn-prepare-gradle"
+                        title="Verify &amp; Pre-download Game Files"
+                        data-i18n-title="play.prepareTitle"
+                      >
+                        <svg class="ico small" aria-hidden="true"><use href="#ico-refresh" /></svg>
+                        <span data-i18n="play.prepareBtn">Verify</span>
+                      </button>
+                    </div>
+                    <span class="inline-status" id="prepare-status-hint">Optional: download game assets before launch</span>
+                    <div class="action-feedback" id="launch-feedback" aria-live="polite" hidden></div>
+                  </div>
+
+                  <div class="stage-links">
                     <span class="loader-summary-pill tabular" id="play-loader-summary">0 mods · 0 shaders</span>
                     <button class="btn-subtle btn-sm" type="button" id="btn-play-open-library">
                       <svg class="ico small" aria-hidden="true"><use href="#ico-cube" /></svg>
                       <span data-i18n="nav.library">Library</span>
                     </button>
-                  </div>
-                </div>
-
-                <div class="java-setup-card" id="java-setup-panel" role="region" aria-labelledby="java-setup-title" hidden>
-                  <div class="java-setup-head">
-                    <span class="java-setup-title" id="java-setup-title" data-i18n="play.javaSetupTitle">Java 21 JDK Required</span>
-                    <span class="row-tag">TEMURIN JDK 21</span>
-                  </div>
-                  <p class="java-setup-desc" id="java-setup-desc" data-i18n="play.javaSetupDesc">
-                    No Java 21 JDK was detected on this PC. Install official Eclipse Temurin 21 into Basalt's runtime directory without administrator rights.
-                  </p>
-                  <div class="java-setup-actions">
-                    <button class="btn-primary btn-sm" type="button" id="btn-install-java" data-i18n="play.installJavaBtn">
-                      Auto-Install Java 21
-                    </button>
-                    <button class="btn-secondary btn-sm" type="button" id="btn-recheck-java" data-i18n="play.recheckJavaBtn">
-                      Rescan
-                    </button>
-                    <button class="btn-secondary btn-sm" type="button" id="btn-open-java-site" data-i18n="play.openJavaSiteBtn">
-                      Official Site
+                    <button class="btn-subtle btn-sm" type="button" id="btn-goto-worlds" data-i18n="play.manageSaves">
+                      Manage saves
                     </button>
                   </div>
                 </div>
 
-                <div class="launch-action-block">
-                  <div class="launch-action-row">
-                    <button class="btn-primary btn-launch" type="button" id="btn-launch-client">
-                      <svg class="ico fill" aria-hidden="true"><use href="#ico-play" /></svg>
-                      <span id="launch-btn-label">Launch Minecraft</span>
-                      <svg class="ico chevron" aria-hidden="true"><use href="#ico-chevron" /></svg>
-                    </button>
-                    <button
-                      class="btn-secondary btn-launch-verify"
-                      type="button"
-                      id="btn-prepare-gradle"
-                      title="Verify &amp; Pre-download Game Files"
-                      data-i18n-title="play.prepareTitle"
-                    >
-                      <svg class="ico small" aria-hidden="true"><use href="#ico-refresh" /></svg>
-                      <span data-i18n="play.prepareBtn">Verify</span>
+                <div class="stage-character" aria-label="Active character">
+                  <div class="stage-pedestal" id="play-skin-stage" title="Tracks cursor · Drag to rotate" data-i18n-title="play.skin3dHint">
+                    <canvas id="play-skin-canvas" width="260" height="310" aria-label="Active player skin" data-i18n-aria="skin.previewAria"></canvas>
+                  </div>
+                  <div class="stage-character-meta">
+                    <div class="stage-character-copy">
+                      <strong id="play-skin-name">Player</strong>
+                      <span class="tabular" id="play-skin-model">Slim · 3 px</span>
+                    </div>
+                    <button class="btn-secondary btn-sm" type="button" id="btn-play-goto-profile" data-i18n="play.customizeSkin">
+                      Edit skin
                     </button>
                   </div>
-                  <span class="inline-status" id="prepare-status-hint">Optional: download game assets before launch</span>
-                  <div class="action-feedback" id="launch-feedback" aria-live="polite" hidden></div>
-                  <pre class="gradle-log-box tabular" id="gradle-log-box" hidden></pre>
+                  <span class="stage-hint" data-i18n="play.skin3dHint">Tracks cursor · Drag to rotate</span>
                 </div>
               </div>
+            </section>
 
-              <div class="play-tuning-strip" aria-label="Quick tuning">
-                <button class="play-tune-tile" type="button" id="btn-play-tune-jvm">
-                  <span class="play-tune-k" data-i18n="play.specRam">JVM Memory &amp; GC</span>
-                  <strong class="play-tune-v tabular" id="play-tune-ram">4096 MB · ZGC</strong>
-                </button>
-                <button class="play-tune-tile" type="button" id="btn-play-tune-gfx">
-                  <span class="play-tune-k" data-i18n="play.specChunks">Render Distance</span>
-                  <strong class="play-tune-v tabular" id="play-tune-gfx">16 chunk · Ultra</strong>
-                </button>
-                <button class="play-tune-tile" type="button" id="btn-play-tune-net">
-                  <span class="play-tune-k" data-i18n="play.tuneNetTitle">Network &amp; Speed</span>
-                  <strong class="play-tune-v tabular" id="play-tune-net">HTTP/2 · TCP Low-Latency</strong>
-                </button>
-              </div>
+            <pre class="gradle-log-box tabular" id="gradle-log-box" hidden></pre>
 
-              <section class="play-library-section" aria-labelledby="play-recent-heading">
-                <div class="play-library-head">
-                  <div style="display:flex;align-items:baseline;gap:0.55rem;">
+            <div class="stage-lower">
+              <section class="stage-shelf" aria-labelledby="play-recent-heading">
+                <div class="stage-shelf-head">
+                  <div class="stage-shelf-title">
                     <h2 id="play-recent-heading" data-i18n="play.recentTitle">Quick jump</h2>
                     <span class="count-label tabular" id="play-recent-count">0</span>
                   </div>
-                  <div class="play-library-actions">
+                  <div class="stage-shelf-actions">
                     <button class="btn-secondary btn-sm" type="button" id="btn-open-gamedir">
                       <svg class="ico small" aria-hidden="true"><use href="#ico-folder" /></svg>
                       <span data-i18n="discord.gameDirBtn">Game Folder</span>
@@ -518,60 +541,59 @@
                   </div>
                 </div>
                 <div class="play-recent-list" id="play-recent-list" role="list"></div>
-                <div class="play-library-footer">
+                <div class="stage-shelf-foot">
                   <span class="muted-copy" data-i18n="play.libraryFooterHint">Launch worlds directly or manage custom local servers in Network settings.</span>
                   <button class="btn-subtle btn-sm" type="button" id="btn-play-add-server" data-i18n="play.addServerLink">Add server</button>
                 </div>
               </section>
+
+              <aside class="stage-side">
+                <div class="play-tuning-strip" aria-label="Quick tuning">
+                  <button class="play-tune-tile" type="button" id="btn-play-tune-jvm">
+                    <span class="play-tune-k" data-i18n="play.specRam">JVM Memory &amp; GC</span>
+                    <strong class="play-tune-v tabular" id="play-tune-ram">4096 MB · ZGC</strong>
+                  </button>
+                  <button class="play-tune-tile" type="button" id="btn-play-tune-gfx">
+                    <span class="play-tune-k" data-i18n="play.specChunks">Render Distance</span>
+                    <strong class="play-tune-v tabular" id="play-tune-gfx">16 chunk · Ultra</strong>
+                  </button>
+                  <button class="play-tune-tile" type="button" id="btn-play-tune-net">
+                    <span class="play-tune-k" data-i18n="play.tuneNetTitle">Network &amp; Speed</span>
+                    <strong class="play-tune-v tabular" id="play-tune-net">HTTP/2 · TCP Low-Latency</strong>
+                  </button>
+                </div>
+
+                <section class="panel-card play-specs-card" aria-label="Client parameters" data-i18n-aria="play.specsTitle">
+                  <div class="section-head">
+                    <h2 data-i18n="play.specsTitle">Client &amp; runtime</h2>
+                  </div>
+                  <dl class="readiness-list" id="play-client-specs">
+                    <div class="kv-row">
+                      <dt class="kv-key" data-i18n="play.specJdk">Java Runtime</dt>
+                      <dd class="kv-val tabular" id="play-spec-jdk">-</dd>
+                    </div>
+                    <div class="kv-row">
+                      <dt class="kv-key" data-i18n="play.specRam">JVM Memory &amp; GC</dt>
+                      <dd class="kv-val tabular" id="play-spec-ram">-</dd>
+                    </div>
+                    <div class="kv-row">
+                      <dt class="kv-key" data-i18n="play.specChunks">Render Distance</dt>
+                      <dd class="kv-val tabular" id="play-spec-chunks">-</dd>
+                    </div>
+                    <div class="kv-row">
+                      <dt class="kv-key" id="play-spec-mod-label" data-i18n="play.specMod">Game cache</dt>
+                      <dd class="kv-val tabular" id="play-spec-mod">-</dd>
+                    </div>
+                  </dl>
+                  <div class="card-footer-actions card-footer-split">
+                    <span class="hw-inline-summary tabular" id="play-hw-summary">Loading hardware profile...</span>
+                    <button class="btn-secondary btn-sm" type="button" id="btn-play-goto-settings" data-i18n="profile.settingsRedirectBtn">
+                      Open Settings
+                    </button>
+                  </div>
+                </section>
+              </aside>
             </div>
-
-            <aside class="play-side-col">
-              <section class="play-skin-card" aria-label="Active character">
-                <div class="play-skin-stage" id="play-skin-stage" title="Tracks cursor · Drag to rotate" data-i18n-title="play.skin3dHint">
-                  <canvas id="play-skin-canvas" width="260" height="310" aria-label="Active player skin" data-i18n-aria="skin.previewAria"></canvas>
-                </div>
-                <div class="play-skin-footer">
-                  <div class="play-skin-meta">
-                    <strong id="play-skin-name">Player</strong>
-                    <span class="tabular" id="play-skin-model">Slim · 3 px</span>
-                    <span class="play-skin-hint" data-i18n="play.skin3dHint">Tracks cursor · Drag to rotate</span>
-                  </div>
-                  <button class="btn-secondary btn-sm" type="button" id="btn-play-goto-profile" data-i18n="play.customizeSkin">
-                    Edit skin
-                  </button>
-                </div>
-              </section>
-
-              <section class="panel-card play-specs-card" aria-label="Client parameters" data-i18n-aria="play.specsTitle">
-                <div class="section-head">
-                  <h2 data-i18n="play.specsTitle">Client &amp; runtime</h2>
-                </div>
-                <dl class="readiness-list" id="play-client-specs">
-                  <div class="kv-row">
-                    <dt class="kv-key" data-i18n="play.specJdk">Java Runtime</dt>
-                    <dd class="kv-val tabular" id="play-spec-jdk">-</dd>
-                  </div>
-                  <div class="kv-row">
-                    <dt class="kv-key" data-i18n="play.specRam">JVM Memory &amp; GC</dt>
-                    <dd class="kv-val tabular" id="play-spec-ram">-</dd>
-                  </div>
-                  <div class="kv-row">
-                    <dt class="kv-key" data-i18n="play.specChunks">Render Distance</dt>
-                    <dd class="kv-val tabular" id="play-spec-chunks">-</dd>
-                  </div>
-                  <div class="kv-row">
-                    <dt class="kv-key" id="play-spec-mod-label" data-i18n="play.specMod">Game cache</dt>
-                    <dd class="kv-val tabular" id="play-spec-mod">-</dd>
-                  </div>
-                </dl>
-                <div class="card-footer-actions card-footer-split">
-                  <span class="hw-inline-summary tabular" id="play-hw-summary">Loading hardware profile...</span>
-                  <button class="btn-secondary btn-sm" type="button" id="btn-play-goto-settings" data-i18n="profile.settingsRedirectBtn">
-                    Open Settings
-                  </button>
-                </div>
-              </section>
-            </aside>
           </div>
         </section>
 
@@ -1543,6 +1565,19 @@
         <button class="btn-secondary" type="button" id="delete-dialog-cancel" data-i18n="worlds.deleteCancel">Cancel</button>
         <button class="btn-danger" type="button" id="delete-dialog-confirm" data-i18n="worlds.deleteConfirm">Delete permanently</button>
       </div>
+    </div>
+  </dialog>
+
+  <dialog class="cmdk" id="cmdk-dialog" aria-label="Command palette" data-i18n-aria="cmdk.dialogAria">
+    <div class="cmdk-panel" id="cmdk-panel">
+      <div class="cmdk-search">
+        <svg class="ico small" aria-hidden="true"><use href="#ico-search" /></svg>
+        <input id="cmdk-input" type="text" role="combobox" aria-expanded="true" aria-controls="cmdk-list" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Type a world, server, page or action…" data-i18n-placeholder="cmdk.placeholder" />
+        <kbd class="cmdk-kbd">Esc</kbd>
+      </div>
+      <ul class="cmdk-list" id="cmdk-list" role="listbox" aria-label="Results" data-i18n-aria="cmdk.resultsAria"></ul>
+      <p class="cmdk-empty" id="cmdk-empty" data-i18n="cmdk.empty" hidden>No matches</p>
+      <div class="cmdk-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> <span data-i18n="cmdk.hintMove">Move</span></span><span><kbd>Enter</kbd> <span data-i18n="cmdk.hintRun">Run</span></span></div>
     </div>
   </dialog>
 
