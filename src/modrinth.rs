@@ -1,12 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::LoaderKind;
-use crate::vanilla::{DownloadTask, curl_fetch_bytes_with_ua, download_batch_with_curl};
+use crate::loaders::{loader_mods_dir, shared_resourcepacks_dir, shared_shaderpacks_dir};
+use crate::vanilla::{
+    BASALT_SKIN_PACK_NAME, CurlCapabilities, DownloadTask, compute_file_sha1_hex,
+    curl_fetch_bytes_with_ua, download_batch_with_curl, hide_window, resolve_curl_exe,
+};
 
 const BASALT_HTTP_UA: &str = "Basalt-Launcher/0.3.1 (https://github.com/Markesrrr/Basalt)";
 const MODRINTH_API_BASE: &str = "https://api.modrinth.com/v2";
@@ -165,6 +171,36 @@ pub struct InstallOutcome {
     pub installed_files: Vec<String>,
     pub skipped_count: usize,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModUpdateInfo {
+    pub filename: String,
+    pub project_id: String,
+    pub title: String,
+    pub current_version: String,
+    pub latest_version: String,
+    pub latest_version_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModrinthUpdateVersion {
+    id: String,
+    #[serde(default)]
+    project_id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    version_number: String,
+    #[serde(default)]
+    files: Vec<ModrinthVersionFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModrinthProjectSummary {
+    id: String,
+    #[serde(default)]
+    title: String,
 }
 
 /// Encodes arbitrary UTF-8 query values using RFC-3986 unreserved characters.
@@ -326,6 +362,7 @@ pub fn install_modrinth_project(
     if !manifest_entries.is_empty() {
         let _guard = manifest_index_lock().lock().unwrap_or_else(|p| p.into_inner());
         let mut index = load_manifest_index(target_dir);
+        remove_stale_replaced_files(target_dir, &index, &manifest_entries);
         for (pid, fname) in manifest_entries {
             index.insert(pid, fname);
         }
@@ -333,6 +370,287 @@ pub fn install_modrinth_project(
     }
 
     Ok(outcome)
+}
+
+/// Removes stale prior `.jar`/`.zip` files (and `.disabled` variants) when an existing Modrinth
+/// project is updated to a newer filename, preventing duplicate-mod crashes in Fabric/Forge.
+fn remove_stale_replaced_files(
+    target_dir: &Path,
+    existing_index: &HashMap<String, String>,
+    new_entries: &[(String, String)],
+) -> usize {
+    let mut removed = 0usize;
+    for (pid, new_fname) in new_entries {
+        let Some(prev_fname) = existing_index.get(pid) else {
+            continue;
+        };
+        if prev_fname.eq_ignore_ascii_case(new_fname) {
+            continue;
+        }
+        if !is_item_present(target_dir, new_fname) {
+            continue;
+        }
+        let Ok(safe_prev) = sanitize_single_file_name(prev_fname) else {
+            continue;
+        };
+        for candidate in [safe_prev.clone(), format!("{safe_prev}.disabled")] {
+            let path = target_dir.join(&candidate);
+            if path.is_file() && fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+fn curl_post_json_with_ua(
+    url: &str,
+    json_body: &[u8],
+    user_agent: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let mut caps = CurlCapabilities::detect();
+    let curl_exe = resolve_curl_exe();
+    for attempt in 0..2 {
+        let mut cmd = Command::new(&curl_exe);
+        cmd.args([
+            "-fsSL",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "--data-binary",
+            "@-",
+            "--retry",
+            "1",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "30",
+        ]);
+        if caps.supports_ssl_revoke_best_effort {
+            cmd.arg("--ssl-revoke-best-effort");
+        }
+        if let Some(ua) = user_agent {
+            cmd.arg("-A").arg(ua);
+        }
+        cmd.arg(url)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        hide_window(&mut cmd);
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to invoke curl.exe POST for {url}: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(json_body)
+                .map_err(|e| format!("Failed to write POST body to curl.exe: {e}"))?;
+        }
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("Failed to wait for curl.exe POST ({url}): {e}"))?;
+        if out.status.success() {
+            return Ok(out.stdout);
+        }
+        if attempt == 0 && out.status.code() == Some(2) && caps.supports_ssl_revoke_best_effort {
+            caps.supports_ssl_revoke_best_effort = false;
+            continue;
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!(
+            "Modrinth API request failed ({url}, exit code {:?}): {stderr}",
+            out.status.code()
+        ));
+    }
+    Err(format!("Modrinth API request failed for {url}"))
+}
+
+fn update_loaders_for_kind(kind: LibraryKind, loader: LoaderKind) -> Vec<&'static str> {
+    match kind {
+        LibraryKind::Mod => match loader {
+            LoaderKind::Fabric => vec!["fabric"],
+            LoaderKind::Forge => vec!["forge"],
+            LoaderKind::Vanilla => vec!["fabric", "forge"],
+        },
+        LibraryKind::Shader => vec!["iris", "optifine"],
+        LibraryKind::ResourcePack => vec!["minecraft"],
+    }
+}
+
+fn build_update_request_body(
+    hashes: &[String],
+    kind: LibraryKind,
+    loader: LoaderKind,
+    mc_version: &str,
+) -> Vec<u8> {
+    let payload = serde_json::json!({
+        "hashes": hashes,
+        "algorithm": "sha1",
+        "loaders": update_loaders_for_kind(kind, loader),
+        "game_versions": [mc_version.trim()],
+    });
+    serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec())
+}
+
+fn extract_current_version_label(display_name: &str) -> String {
+    if let Some(idx) = display_name.find(|c: char| c.is_ascii_digit()) {
+        let start = display_name[..idx]
+            .rfind(['-', '_', '+', ' '])
+            .map(|p| p + 1)
+            .unwrap_or(idx);
+        let tail = display_name[start..].trim();
+        if !tail.is_empty() {
+            return tail.to_string();
+        }
+    }
+    display_name.to_string()
+}
+
+fn parse_update_check_response(
+    installed_by_hash: &HashMap<String, InstalledLibraryItem>,
+    raw_json: &[u8],
+) -> Result<Vec<ModUpdateInfo>, String> {
+    let updates_map: HashMap<String, ModrinthUpdateVersion> = serde_json::from_slice(raw_json)
+        .map_err(|e| format!("Failed to parse Modrinth update response: {e}"))?;
+
+    let mut updates = Vec::new();
+    for (hash_key, latest) in updates_map {
+        let hash_lower = hash_key.to_ascii_lowercase();
+        let Some(item) = installed_by_hash.get(&hash_lower) else {
+            continue;
+        };
+        let primary_file = latest
+            .files
+            .iter()
+            .find(|f| f.primary)
+            .or_else(|| latest.files.first());
+        let Some(file) = primary_file else {
+            continue;
+        };
+        if let Some(ref latest_sha1) = file.hashes.sha1
+            && latest_sha1.eq_ignore_ascii_case(&hash_lower)
+        {
+            continue;
+        }
+        let installed_base = item
+            .file_name
+            .strip_suffix(".disabled")
+            .unwrap_or(&item.file_name);
+        if file.filename.eq_ignore_ascii_case(installed_base) {
+            continue;
+        }
+
+        let latest_version = if !latest.version_number.trim().is_empty() {
+            latest.version_number.trim().to_string()
+        } else if !latest.name.trim().is_empty() {
+            latest.name.trim().to_string()
+        } else {
+            latest.id.clone()
+        };
+        let fallback_title = if !latest.name.trim().is_empty() {
+            latest.name.trim().to_string()
+        } else {
+            item.display_name.clone()
+        };
+
+        updates.push(ModUpdateInfo {
+            filename: item.file_name.clone(),
+            project_id: latest.project_id.clone(),
+            title: fallback_title,
+            current_version: extract_current_version_label(&item.display_name),
+            latest_version,
+            latest_version_id: latest.id,
+        });
+    }
+
+    updates.sort_by(|a, b| {
+        a.filename
+            .to_ascii_lowercase()
+            .cmp(&b.filename.to_ascii_lowercase())
+    });
+    Ok(updates)
+}
+
+fn enrich_project_titles(updates: &mut [ModUpdateInfo]) {
+    let ids: Vec<String> = updates
+        .iter()
+        .map(|u| u.project_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let Ok(ids_json) = serde_json::to_string(&ids) else {
+        return;
+    };
+    let url = format!("{MODRINTH_API_BASE}/projects?ids={}", percent_encode(&ids_json));
+    let Ok(raw) = curl_fetch_bytes_with_ua(&url, Some(BASALT_HTTP_UA)) else {
+        return;
+    };
+    let Ok(projects) = serde_json::from_slice::<Vec<ModrinthProjectSummary>>(&raw) else {
+        return;
+    };
+    let title_map: HashMap<String, String> = projects
+        .into_iter()
+        .filter(|p| !p.title.trim().is_empty())
+        .map(|p| (p.id, p.title))
+        .collect();
+    for u in updates.iter_mut() {
+        if let Some(title) = title_map.get(&u.project_id) {
+            u.title = title.clone();
+        }
+    }
+}
+
+/// Checks installed library files against Modrinth's SHA-1 `/v2/version_files/update` API
+/// for `mc_version` and `loader`, returning only items with a genuinely newer release available.
+pub fn check_library_updates(
+    run_dir: &Path,
+    vanilla_dir: &Path,
+    kind: LibraryKind,
+    loader: LoaderKind,
+    mc_version: &str,
+) -> Result<Vec<ModUpdateInfo>, String> {
+    let target_dir = match kind {
+        LibraryKind::Mod => loader_mods_dir(vanilla_dir, run_dir, loader, mc_version),
+        LibraryKind::Shader => shared_shaderpacks_dir(run_dir),
+        LibraryKind::ResourcePack => shared_resourcepacks_dir(run_dir),
+    };
+    let items = list_library_items(&target_dir, kind);
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut by_hash: HashMap<String, InstalledLibraryItem> = HashMap::new();
+    let mut hashes = Vec::new();
+    for item in items {
+        let p = Path::new(&item.path);
+        if !p.is_file() {
+            continue;
+        }
+        if let Ok(sha1) = compute_file_sha1_hex(p) {
+            let lower = sha1.to_ascii_lowercase();
+            if let std::collections::hash_map::Entry::Vacant(entry) = by_hash.entry(lower.clone()) {
+                hashes.push(lower);
+                entry.insert(item);
+            }
+        }
+    }
+    if hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let body = build_update_request_body(&hashes, kind, loader, mc_version);
+    let url = format!("{MODRINTH_API_BASE}/version_files/update");
+    let raw = curl_post_json_with_ua(&url, &body, Some(BASALT_HTTP_UA))?;
+    let mut updates = parse_update_check_response(&by_hash, &raw)?;
+    if !updates.is_empty() {
+        enrich_project_titles(&mut updates);
+    }
+    Ok(updates)
 }
 
 fn fetch_specific_version(version_id: &str) -> Result<Option<ModrinthVersion>, String> {
@@ -633,6 +951,9 @@ pub fn list_library_items(dir: &Path, kind: LibraryKind) -> Vec<InstalledLibrary
         };
         let is_disabled = name.ends_with(".disabled");
         let base_name = name.strip_suffix(".disabled").unwrap_or(&name);
+        if kind == LibraryKind::ResourcePack && is_managed_internal_pack(base_name) {
+            continue;
+        }
         let lower = base_name.to_ascii_lowercase();
 
         let valid = match kind {
@@ -808,6 +1129,10 @@ fn save_manifest_index(dir: &Path, index: &HashMap<String, String>) {
     }
 }
 
+fn is_managed_internal_pack(base_name: &str) -> bool {
+    base_name.eq_ignore_ascii_case(BASALT_SKIN_PACK_NAME)
+}
+
 fn collect_installed_stems_lower(dir: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
@@ -820,6 +1145,9 @@ fn collect_installed_stems_lower(dir: &Path) -> Vec<String> {
                 return None;
             }
             let base = name.strip_suffix(".disabled").unwrap_or(&name);
+            if is_managed_internal_pack(base) {
+                return None;
+            }
             let stem = base
                 .strip_suffix(".jar")
                 .or_else(|| base.strip_suffix(".zip"))
@@ -900,6 +1228,104 @@ mod tests {
         delete_library_item(&temp_root, "sodium-0.6.5.jar").unwrap();
         delete_library_item(&temp_root, &toggled).unwrap();
         assert!(list_library_items(&temp_root, LibraryKind::Mod).is_empty());
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn excludes_basalt_skin_pack_cleans_replaced_jars_and_parses_updates() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "basalt_modrinth_phase2_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_root);
+        fs::create_dir_all(&temp_root).unwrap();
+
+        // 1. Managed basalt_skin.zip (+ .disabled) must be excluded from ResourcePack listings
+        fs::write(temp_root.join(BASALT_SKIN_PACK_NAME), b"zip").unwrap();
+        fs::write(temp_root.join(format!("{BASALT_SKIN_PACK_NAME}.disabled")), b"zip").unwrap();
+        fs::write(temp_root.join("FreshAnimations.zip"), b"zip").unwrap();
+        let packs = list_library_items(&temp_root, LibraryKind::ResourcePack);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].file_name, "FreshAnimations.zip");
+
+        // 2. Updating a tracked mod removes the stale older .jar after the new .jar is in place
+        let mods_dir = temp_root.join("mods");
+        fs::create_dir_all(&mods_dir).unwrap();
+        fs::write(mods_dir.join("sodium-0.6.4.jar"), b"old").unwrap();
+        fs::write(mods_dir.join("sodium-0.6.5.jar"), b"new").unwrap();
+        let mut existing = HashMap::new();
+        existing.insert("AANobbMI".to_string(), "sodium-0.6.4.jar".to_string());
+        let removed = remove_stale_replaced_files(
+            &mods_dir,
+            &existing,
+            &[("AANobbMI".to_string(), "sodium-0.6.5.jar".to_string())],
+        );
+        assert_eq!(removed, 1);
+        assert!(!mods_dir.join("sodium-0.6.4.jar").exists());
+        assert!(mods_dir.join("sodium-0.6.5.jar").is_file());
+
+        // 3. Modrinth update check parser returns only genuinely newer releases
+        let mut by_hash = HashMap::new();
+        by_hash.insert(
+            "aaaa".to_string(),
+            InstalledLibraryItem {
+                file_name: "sodium-0.6.5.jar".to_string(),
+                display_name: "sodium-0.6.5".to_string(),
+                kind: LibraryKind::Mod,
+                enabled: true,
+                size_bytes: 100,
+                path: mods_dir.join("sodium-0.6.5.jar").to_string_lossy().into_owned(),
+                project_id: Some("AANobbMI".to_string()),
+            },
+        );
+        by_hash.insert(
+            "bbbb".to_string(),
+            InstalledLibraryItem {
+                file_name: "iris-1.8.8.jar".to_string(),
+                display_name: "iris-1.8.8".to_string(),
+                kind: LibraryKind::Mod,
+                enabled: true,
+                size_bytes: 100,
+                path: mods_dir.join("iris-1.8.8.jar").to_string_lossy().into_owned(),
+                project_id: Some("YL57xq9U".to_string()),
+            },
+        );
+        let api_resp = serde_json::json!({
+            "aaaa": {
+                "id": "ver-new-1",
+                "project_id": "AANobbMI",
+                "name": "Sodium 0.6.9",
+                "version_number": "mc1.21.4-0.6.9",
+                "files": [{
+                    "url": "https://cdn.modrinth.com/sodium-0.6.9.jar",
+                    "filename": "sodium-0.6.9.jar",
+                    "primary": true,
+                    "size": 200,
+                    "hashes": { "sha1": "cccc" }
+                }]
+            },
+            "bbbb": {
+                "id": "ver-same",
+                "project_id": "YL57xq9U",
+                "name": "Iris 1.8.8",
+                "version_number": "1.8.8",
+                "files": [{
+                    "url": "https://cdn.modrinth.com/iris-1.8.8.jar",
+                    "filename": "iris-1.8.8.jar",
+                    "primary": true,
+                    "size": 100,
+                    "hashes": { "sha1": "bbbb" }
+                }]
+            }
+        });
+        let updates = parse_update_check_response(&by_hash, &serde_json::to_vec(&api_resp).unwrap()).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].filename, "sodium-0.6.5.jar");
+        assert_eq!(updates[0].project_id, "AANobbMI");
+        assert_eq!(updates[0].current_version, "0.6.5");
+        assert_eq!(updates[0].latest_version, "mc1.21.4-0.6.9");
+        assert_eq!(updates[0].latest_version_id, "ver-new-1");
+
         let _ = fs::remove_dir_all(&temp_root);
     }
 }

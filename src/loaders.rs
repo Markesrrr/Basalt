@@ -288,11 +288,40 @@ fn create_dir_link_if_needed(target: &Path, link: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    // Graceful non-NTFS / FAT32 / exFAT / UNC fallback: copy existing shared files without failing Forge launch.
-    fs::create_dir_all(link).map_err(|e| {
-        format!("Failed to create fallback shared folder {}: {e}", link.display())
+    // Graceful non-NTFS / FAT32 / exFAT / UNC fallback: copy missing shared files non-destructively
+    // without moving or emptying the primary shared `run/` folders.
+    copy_dir_recursive_if_missing(target, link)?;
+    Ok(())
+}
+
+fn copy_dir_recursive_if_missing(src_dir: &Path, dst_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dst_dir).map_err(|e| {
+        format!("Failed to create fallback shared folder {}: {e}", dst_dir.display())
     })?;
-    let _ = migrate_dir_non_destructively(target, link);
+    let Ok(entries) = fs::read_dir(src_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let src_item = entry.path();
+        let Ok(meta) = fs::symlink_metadata(&src_item) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let dst_item = dst_dir.join(entry.file_name());
+        if meta.is_dir() {
+            copy_dir_recursive_if_missing(&src_item, &dst_item)?;
+        } else if meta.is_file() && !dst_item.exists() {
+            fs::copy(&src_item, &dst_item).map_err(|e| {
+                format!(
+                    "Failed to copy shared file {} to {}: {e}",
+                    src_item.display(),
+                    dst_item.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 
@@ -1087,5 +1116,39 @@ mod tests {
         ];
         let evaluated = evaluate_argument_values(&raw_args, "windows", "x86");
         assert_eq!(evaluated, vec!["--launchTarget", "-Dwin=true", "-Darch=ok"]);
+    }
+
+    #[test]
+    fn copy_dir_recursive_if_missing_preserves_source_and_existing_dest() {
+        let tmp = std::env::temp_dir().join(format!(
+            "basalt_loaders_copy_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let src = tmp.join("run_saves");
+        let dst = tmp.join("forge_saves");
+        fs::create_dir_all(src.join("WorldA")).unwrap();
+        fs::write(src.join("WorldA").join("level.dat"), b"world-a-data").unwrap();
+        fs::create_dir_all(dst.join("WorldA")).unwrap();
+        fs::write(dst.join("WorldA").join("existing.txt"), b"keep-me").unwrap();
+        fs::write(src.join("WorldA").join("existing.txt"), b"do-not-overwrite").unwrap();
+
+        copy_dir_recursive_if_missing(&src, &dst).unwrap();
+
+        // Source must stay completely intact (never moved or deleted).
+        assert_eq!(
+            fs::read(src.join("WorldA").join("level.dat")).unwrap(),
+            b"world-a-data"
+        );
+        // Missing files copied to destination, existing destination files preserved.
+        assert_eq!(
+            fs::read(dst.join("WorldA").join("level.dat")).unwrap(),
+            b"world-a-data"
+        );
+        assert_eq!(
+            fs::read(dst.join("WorldA").join("existing.txt")).unwrap(),
+            b"keep-me"
+        );
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

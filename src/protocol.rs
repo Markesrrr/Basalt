@@ -322,6 +322,8 @@ pub struct ServerPingInfo {
     pub max_players: i32,
     pub description: String,
     pub latency_ms: u64,
+    #[serde(default)]
+    pub favicon: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -332,6 +334,8 @@ struct SlpResponse {
     players: SlpPlayers,
     #[serde(default)]
     description: serde_json::Value,
+    #[serde(default)]
+    favicon: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -433,14 +437,79 @@ fn extract_description_text(val: &serde_json::Value) -> String {
     "Server".to_string()
 }
 
-pub fn ping_server_1_21_4(address: &str) -> Result<ServerPingInfo, String> {
+const MAX_FAVICON_DATA_URL_BYTES: usize = 128 * 1024;
+
+/// Maps supported Minecraft Java versions (`1.16.5`..`1.21.4`) to their network protocol numbers.
+pub fn protocol_version_for_mc(mc_version: &str) -> i32 {
+    match mc_version.trim() {
+        "1.21.4" => 769,
+        "1.21.3" | "1.21.2" => 768,
+        "1.21.1" | "1.21" => 767,
+        "1.20.6" => 766,
+        "1.20.4" => 765,
+        "1.20.2" => 764,
+        "1.20.1" | "1.20" => 763,
+        "1.19.4" => 762,
+        "1.19.2" => 760,
+        "1.18.2" => 758,
+        "1.17.1" => 756,
+        "1.16.5" => 754,
+        _ => MINECRAFT_1_21_4_PROTOCOL,
+    }
+}
+
+/// Strips Minecraft legacy formatting codes (`§0`-`§f`, `§k`-`§o`, `§r`, `§x`) cleanly from MOTD text.
+pub fn strip_mc_formatting_codes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '§'
+            && let Some(&next) = chars.peek()
+            && (next.is_ascii_hexdigit()
+                || matches!(next, 'k'..='o' | 'K'..='O' | 'r' | 'R' | 'x' | 'X'))
+        {
+            chars.next();
+            continue;
+        }
+        out.push(ch);
+    }
+    out.trim().to_string()
+}
+
+fn sanitize_favicon(raw: Option<String>) -> Option<String> {
+    let cleaned: String = raw?
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .collect();
+    if cleaned.len() <= MAX_FAVICON_DATA_URL_BYTES
+        && cleaned.starts_with("data:image/png;base64,")
+        && cleaned.len() > "data:image/png;base64,".len()
+    {
+        Some(cleaned)
+    } else {
+        None
+    }
+}
+
+pub fn ping_server_for_version(
+    address: &str,
+    protocol_version: i32,
+) -> Result<ServerPingInfo, String> {
+    let proto = if protocol_version > 0 {
+        protocol_version
+    } else {
+        MINECRAFT_1_21_4_PROTOCOL
+    };
     let (host, port) = parse_host_port(address);
+    let connect_start = Instant::now();
     let mut stream = connect_first_reachable(&host, port, Duration::from_secs(3))?;
+    let connect_rtt_ms = connect_start.elapsed().as_millis().max(1) as u64;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
 
     let mut handshake = PacketBuffer::new();
-    handshake.write_varint(MINECRAFT_1_21_4_PROTOCOL);
+    handshake.write_varint(proto);
     handshake.write_string(&host);
     handshake.write_u16(port);
     handshake.write_varint(1);
@@ -448,7 +517,9 @@ pub fn ping_server_1_21_4(address: &str) -> Result<ServerPingInfo, String> {
 
     write_framed_packet(&mut stream, 0x00, &[], None)?;
 
+    let status_start = Instant::now();
     let (id, mut body) = read_framed_packet(&mut stream, None)?;
+    let status_rtt_ms = status_start.elapsed().as_millis().max(1) as u64;
     if id != 0x00 {
         return Err(format!("Unexpected SLP packet ID: 0x{id:02X}"));
     }
@@ -456,22 +527,31 @@ pub fn ping_server_1_21_4(address: &str) -> Result<ServerPingInfo, String> {
     let parsed: SlpResponse =
         serde_json::from_str(&json_str).map_err(|e| format!("SLP JSON error: {e}"))?;
 
-    let start = Instant::now();
+    let ping_start = Instant::now();
     let mut ping = PacketBuffer::new();
     ping.write_i64(1337);
-    write_framed_packet(&mut stream, 0x01, &ping.data, None)?;
-    let _ = read_framed_packet(&mut stream, None);
-    let latency_ms = start.elapsed().as_millis() as u64;
+    let latency_ms = if write_framed_packet(&mut stream, 0x01, &ping.data, None).is_ok()
+        && matches!(read_framed_packet(&mut stream, None), Ok((0x01, _)))
+    {
+        ping_start.elapsed().as_millis().max(1) as u64
+    } else {
+        connect_rtt_ms.min(status_rtt_ms)
+    };
 
     Ok(ServerPingInfo {
         address: address.to_string(),
-        version_name: parsed.version.name,
+        version_name: strip_mc_formatting_codes(&parsed.version.name),
         protocol_version: parsed.version.protocol,
         online_players: parsed.players.online,
         max_players: parsed.players.max,
-        description: extract_description_text(&parsed.description),
+        description: strip_mc_formatting_codes(&extract_description_text(&parsed.description)),
         latency_ms,
+        favicon: sanitize_favicon(parsed.favicon),
     })
+}
+
+pub fn ping_server_1_21_4(address: &str) -> Result<ServerPingInfo, String> {
+    ping_server_for_version(address, MINECRAFT_1_21_4_PROTOCOL)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -485,24 +565,53 @@ pub enum LocalHandshakeResult {
     Disconnected(String),
 }
 
-/// Tests an offline-mode (`online-mode=false`) Login handshake against Protocol 769 (1.21.4).
+fn build_login_start_payload_for_protocol(username: &str, protocol_version: i32) -> Vec<u8> {
+    let mut buf = PacketBuffer::new();
+    buf.write_string(username);
+    if protocol_version >= 764 {
+        // 1.20.2+ : username + raw UUID
+        buf.write_uuid(local_player_uuid_bytes(username));
+    } else if protocol_version >= 761 {
+        // 1.19.3 - 1.20.1 : username + has_uuid (bool) + UUID
+        buf.data.push(1);
+        buf.write_uuid(local_player_uuid_bytes(username));
+    } else if protocol_version == 760 {
+        // 1.19.1 - 1.19.2 : username + has_sig_data (false) + has_uuid (true) + UUID
+        buf.data.push(0);
+        buf.data.push(1);
+        buf.write_uuid(local_player_uuid_bytes(username));
+    } else if protocol_version == 759 {
+        // 1.19 : username + has_sig_data (false)
+        buf.data.push(0);
+    }
+    // <= 758 (1.16.5 - 1.18.2): username only
+    buf.data
+}
+
+/// Tests an offline-mode (`online-mode=false`) Login handshake against `protocol_version`.
 /// Never bypasses encryption or official Microsoft authentication.
-pub fn probe_local_dev_login_1_21_4(
+pub fn probe_local_dev_login_for_version(
     address: &str,
     username: &str,
+    protocol_version: i32,
 ) -> Result<LocalHandshakeResult, String> {
+    let proto = if protocol_version > 0 {
+        protocol_version
+    } else {
+        MINECRAFT_1_21_4_PROTOCOL
+    };
     let (host, port) = parse_host_port(address);
     let mut stream = connect_first_reachable(&host, port, Duration::from_secs(3))?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
 
     let mut handshake = PacketBuffer::new();
-    handshake.write_varint(MINECRAFT_1_21_4_PROTOCOL);
+    handshake.write_varint(proto);
     handshake.write_string(&host);
     handshake.write_u16(port);
     handshake.write_varint(2);
     write_framed_packet(&mut stream, 0x00, &handshake.data, None)?;
 
-    let login_payload = build_login_start_payload_1_21_4(username);
+    let login_payload = build_login_start_payload_for_protocol(username, proto);
     write_framed_packet(&mut stream, 0x00, &login_payload, None)?;
 
     let mut compression = None;
@@ -511,15 +620,22 @@ pub fn probe_local_dev_login_1_21_4(
         match pkt_id {
             0x00 => {
                 let reason = body.read_string().unwrap_or_else(|_| "Disconnected".into());
-                return Ok(LocalHandshakeResult::Disconnected(reason));
+                return Ok(LocalHandshakeResult::Disconnected(
+                    strip_mc_formatting_codes(&reason),
+                ));
             }
             0x01 => return Ok(LocalHandshakeResult::RequiresOfficialAuth),
             0x02 => {
-                write_framed_packet(&mut stream, 0x03, &[], compression)?;
+                if proto >= 764 {
+                    write_framed_packet(&mut stream, 0x03, &[], compression)?;
+                }
+                let phase = if proto >= 764 {
+                    "entered Configuration phase"
+                } else {
+                    "accepted Login Success"
+                };
                 return Ok(LocalHandshakeResult::ReadyInPlay {
-                    server_info: format!(
-                        "{MINECRAFT_1_21_4_NAME} (Protocol {MINECRAFT_1_21_4_PROTOCOL}) entered Configuration phase"
-                    ),
+                    server_info: format!("Protocol {proto} {phase}"),
                     keep_alive_tested: true,
                 });
             }
@@ -540,6 +656,15 @@ pub fn probe_local_dev_login_1_21_4(
     ))
 }
 
+/// Tests an offline-mode (`online-mode=false`) Login handshake against Protocol 769 (1.21.4).
+/// Never bypasses encryption or official Microsoft authentication.
+pub fn probe_local_dev_login_1_21_4(
+    address: &str,
+    username: &str,
+) -> Result<LocalHandshakeResult, String> {
+    probe_local_dev_login_for_version(address, username, MINECRAFT_1_21_4_PROTOCOL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +679,33 @@ mod tests {
 
         assert_eq!(parse_host_port("[::1]:25575"), ("::1".to_string(), 25575));
         assert_eq!(parse_host_port("[::1]"), ("::1".to_string(), 25565));
+    }
+
+    #[test]
+    fn strips_mc_formatting_codes_and_validates_favicon_and_protocols() {
+        assert_eq!(
+            strip_mc_formatting_codes("§a§lBasalt §r§6SMP §KTest"),
+            "Basalt SMP Test"
+        );
+        assert_eq!(protocol_version_for_mc("1.21.4"), 769);
+        assert_eq!(protocol_version_for_mc("1.20.1"), 763);
+        assert_eq!(protocol_version_for_mc("1.16.5"), 754);
+
+        let valid_fav = Some("data:image/png;base64,iVBORw0K\nGgo=".to_string());
+        assert_eq!(
+            sanitize_favicon(valid_fav).as_deref(),
+            Some("data:image/png;base64,iVBORw0KGgo=")
+        );
+        assert!(sanitize_favicon(Some("data:image/svg+xml;base64,abc".to_string())).is_none());
+        let oversized = format!("data:image/png;base64,{}", "A".repeat(MAX_FAVICON_DATA_URL_BYTES + 10));
+        assert!(sanitize_favicon(Some(oversized)).is_none());
+
+        // Legacy vs modern Login Start packet layout
+        let p_1_16 = build_login_start_payload_for_protocol("Steve", 754);
+        assert_eq!(p_1_16.len(), 1 + 5);
+        let p_1_20_1 = build_login_start_payload_for_protocol("Steve", 763);
+        assert_eq!(p_1_20_1.len(), 1 + 5 + 1 + 16);
+        let p_1_21_4 = build_login_start_payload_for_protocol("Steve", 769);
+        assert_eq!(p_1_21_4.len(), 1 + 5 + 16);
     }
 }

@@ -99,7 +99,17 @@ jobs:
           $isPre = ("$tag" -match '^v0\.') -or ("$tag" -match '-') -or ("${{ inputs.prerelease }}" -eq "true")
           $preLabel = if ($isPre) { "Pre-release" } else { "Release" }
           $title = if ($isPre) { "Basalt $tag (Pre-release)" } else { "Basalt $tag" }
-          $highlights = if ($tag -like 'v0.3.1*') {
+          $highlights = if ($tag -like 'v0.4*') {
+            @(
+              "- **World Thumbnails, Playtime Tracking & 1-Click Backup/Restore:** View world ``icon.png`` previews, per-world & total playtime stats, and create/restore/delete safe atomic ZIP world snapshots directly from the Worlds view"
+              "- **Smart Crash Doctor & 1-Click Diagnostics:** Automatic crash-report & log diagnosis for OOM, Java mismatch, missing mod dependencies, mod crashes, OpenGL/GPU driver issues, and session locks, plus 1-click Copy Launch Diagnostics"
+              "- **In-Game Screenshots Gallery & Lightbox:** Browse ``run/screenshots`` with resolution badges, keyboard-navigable lightbox modal, delete, and folder access"
+              "- **Live Server Status Cards & Modrinth Update Checker:** Protocol-aware async server ping with favicon, latency ms, player counts, and clean MOTD; batch SHA-1 Modrinth mod update detection & 1-click updates without leaving stale duplicate ``.jar``s"
+              "- **Strata Stage UI, Sliding Pills & 3D Skin Inertia:** Sticky sliding-pill gliders across segmented controls, damped 3D skin drag-to-orbit with double-click pose reset, multi-layer basalt strata parallax, and full EN/TR/DE parity"
+              "- **In-Game ``options.txt`` Preservation & Reliability Fixes:** Preserves user VSync/FPS/video settings across launches, protects non-NTFS Forge shared folders, gates ZGC to JDK 17+, prevents download/session races, and adds real RFC 4122 v3 MD5 offline UUIDs"
+              "- **Unsigned Build Notice:** Pre-release builds are compiled without a commercial Authenticode certificate. Verify SHA-256 against ``SHA256SUMS.txt``; if SmartScreen prompts, extract the ``.zip`` or choose **More info -> Run anyway**"
+            )
+          } elseif ($tag -like 'v0.3.1*') {
             @(
               "- **Cross-PC Windows Portability & Downloader Hardening:** Resolves built-in ``%SystemRoot%\System32\{curl,tar}.exe`` (preventing Git/MSYS2 PATH shadowing), handles Schannel TLS fallback cleanly, isolates concurrent download temp dirs, retries through Windows Defender sharing locks, uses ``@argfile`` above 24,000-char launch command lines, and falls back to `%TEMP%\Basalt\data` if AppData lookup fails"
               "- **Multi-Java & Loader Fixes (1.16.5 – 1.21.4):** Parses Java 8 (``1.8.0_x``) and Java 21+, prefers Java 8/11 on Forge 1.16.5 and Java 17 on Forge 1.17–1.20.4 when installed, repairs/falls back cleanly on non-NTFS/UNC mod junctions, filters incompatible Fabric ``< 0.15.0`` builds, fixes Forge JPMS duplicate module errors, and enforces Modrinth dependency/hash checks & loud kit errors"

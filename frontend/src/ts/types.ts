@@ -133,6 +133,7 @@ export interface ClientOptimizationReport {
   dns_flushed: boolean;
   applied_flags_count: number;
   active_flags: string[];
+  config?: AppConfig;
 }
 
 export interface TurboSettingsDto {
@@ -144,6 +145,67 @@ export interface MinecraftSaveSummary {
   id: string;
   modified_epoch_secs: number;
   size_bytes: number;
+  icon_data_url?: string | null;
+  backup_count?: number;
+}
+
+export interface WorldBackupSummary {
+  filename: string;
+  save_id: string;
+  created_epoch_secs: number;
+  size_bytes: number;
+  file_count: number;
+}
+
+export type CrashCode =
+  | "out_of_memory"
+  | "java_version_mismatch"
+  | "missing_mod_dependency"
+  | "mod_crash"
+  | "gpu_driver_opengl"
+  | "session_lock"
+  | "corrupt_asset_or_jar"
+  | "unknown_crash";
+
+export type CrashSeverity = "critical" | "error" | "warning";
+
+export interface CrashDiagnosis {
+  code: CrashCode;
+  severity: CrashSeverity;
+  offending_mod: string | null;
+  details: string;
+  suggested_action: string;
+  log_excerpt: string[];
+  crash_report_path?: string | null;
+}
+
+export interface ScreenshotItem {
+  filename: string;
+  size_bytes: number;
+  modified_epoch_secs: number;
+  width: number;
+  height: number;
+}
+
+export interface ModUpdateInfo {
+  filename: string;
+  project_id: string;
+  title: string;
+  current_version: string;
+  latest_version: string;
+  latest_version_id: string;
+}
+
+export interface WorldPlayStats {
+  playtime_secs: number;
+  sessions: number;
+  last_played_epoch_secs: number;
+}
+
+export interface PlaytimeStatsDto {
+  total_playtime_secs: number;
+  total_sessions: number;
+  per_world: Record<string, WorldPlayStats>;
 }
 
 export interface HardwareProfile {
@@ -272,6 +334,8 @@ export interface BootstrapDto {
   skin_is_slim: boolean;
   running_session: RunningSessionDto | null;
   hardware_notice: string | null;
+  player_uuid?: string;
+  playtime_stats?: PlaytimeStatsDto;
 }
 
 export interface SkinResultDto {
@@ -300,6 +364,7 @@ export interface ServerPingInfo {
   max_players: number;
   description: string;
   latency_ms: number;
+  favicon?: string | null;
 }
 
 export type LocalHandshakeResult =
@@ -323,4 +388,6 @@ export interface SessionEndedPayload {
   vanilla: VanillaEnvStatus;
   loader_status: LoaderEnvStatus;
   library_counts: LibraryCounts;
+  diagnosis?: CrashDiagnosis | null;
+  playtime_stats?: PlaytimeStatsDto | null;
 }

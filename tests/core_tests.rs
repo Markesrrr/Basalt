@@ -8,6 +8,9 @@ use basalt::config::{
     AccentTone, AppConfig, CornerStyle, GraphicsSettings, JvmGcMode, LayoutMode, SkinModel,
     ThemeMode, UiLanguage, normalize_hex_color,
 };
+use basalt::crash_doctor::{
+    CrashCode, CrashSeverity, diagnose_crash, diagnose_crash_text, find_recent_crash_report,
+};
 use basalt::hardware::{GpuTier, HardwareProfile};
 use basalt::options_txt::{
     ensure_launch_options, fov_degrees_to_options_value, read_minecraft_options_into,
@@ -18,11 +21,18 @@ use basalt::protocol::{
     parse_host_port, ping_server_1_21_4, probe_local_dev_login_1_21_4, read_framed_packet,
     write_framed_packet,
 };
-use basalt::saves::{delete_save, list_saves, resolve_save_dir};
+use basalt::saves::{
+    MAX_WORLD_ICON_BYTES, create_world_backup, delete_save, delete_world_backup, list_saves,
+    list_saves_with_backups, list_world_backups, resolve_save_dir, restore_world_backup,
+};
+use basalt::screenshots::{
+    delete_screenshot, list_screenshots, read_screenshot_data_url, resolve_screenshot_path,
+};
 use basalt::sounds::{encode_base64, load_local_minecraft_sounds};
+use basalt::stats::{load_playtime_stats, record_playtime_session};
 use basalt::vanilla::{
-    BASALT_SKIN_PACK_NAME, discover_java21_home, evaluate_jdk_candidates, is_ascii_path,
-    migrate_legacy_client_gradle_saves, resolve_vanilla_dir,
+    BASALT_SKIN_PACK_NAME, build_stored_zip, discover_java21_home, evaluate_jdk_candidates,
+    is_ascii_path, migrate_legacy_client_gradle_saves, resolve_vanilla_dir,
 };
 use image::{ImageBuffer, Rgba};
 
@@ -450,6 +460,265 @@ fn offline_uuid_ipv6_host_port_bounds_and_float_sanitization() {
     assert_eq!(loaded_cfg.graphics.simulation_distance, 5);
     assert_eq!(loaded_cfg.graphics.max_fps, 260);
     assert_eq!(loaded_cfg.graphics.jvm_ram_mb, 16384);
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn world_icon_backup_restore_zip_slip_and_atomic_safety() {
+    let tmp = std::env::temp_dir().join(format!(
+        "basalt_world_backup_integration_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    let saves_dir = tmp.join("saves");
+    let backups_dir = tmp.join("backups").join("worlds");
+    let world_dir = saves_dir.join("Basalt Survival");
+    fs::create_dir_all(world_dir.join("region")).unwrap();
+    fs::create_dir_all(world_dir.join("datapacks")).unwrap();
+
+    let original_level_dat = vec![0x42u8; 2048];
+    fs::write(world_dir.join("level.dat"), &original_level_dat).unwrap();
+    fs::write(world_dir.join("region").join("r.0.0.mca"), b"chunk-v1").unwrap();
+    fs::write(world_dir.join("session.lock"), b"lock").unwrap();
+
+    // Write valid 64x64 world icon.png
+    let icon_img = ImageBuffer::from_pixel(64, 64, Rgba([44u8, 120, 88, 255]));
+    icon_img.save(world_dir.join("icon.png")).unwrap();
+
+    let initial_saves = list_saves_with_backups(&saves_dir, &backups_dir).unwrap();
+    assert_eq!(initial_saves.len(), 1);
+    assert_eq!(initial_saves[0].id, "Basalt Survival");
+    assert_eq!(initial_saves[0].backup_count, 0);
+    assert!(
+        initial_saves[0]
+            .icon_data_url
+            .as_deref()
+            .is_some_and(|u| u.starts_with("data:image/png;base64,"))
+    );
+
+    // Oversized (>256 KB) icon.png should be ignored safely (None)
+    let big_world = saves_dir.join("OversizedIconWorld");
+    fs::create_dir_all(&big_world).unwrap();
+    fs::write(big_world.join("level.dat"), b"nbt").unwrap();
+    let mut oversized_png = b"\x89PNG\r\n\x1a\n".to_vec();
+    oversized_png.resize(MAX_WORLD_ICON_BYTES + 16, 0x11);
+    fs::write(big_world.join("icon.png"), &oversized_png).unwrap();
+    let saves_two = list_saves(&saves_dir).unwrap();
+    let big_summary = saves_two.iter().find(|s| s.id == "OversizedIconWorld").unwrap();
+    assert!(big_summary.icon_data_url.is_none());
+
+    // Create two backups back-to-back and verify unique filenames + backup_count
+    let b1 = create_world_backup(&saves_dir, &backups_dir, "Basalt Survival").unwrap();
+    let b2 = create_world_backup(&saves_dir, &backups_dir, "Basalt Survival").unwrap();
+    assert_ne!(b1.filename, b2.filename);
+    assert_eq!(b1.save_id, "Basalt Survival");
+    assert_eq!(b1.file_count, 3); // level.dat, region/r.0.0.mca, icon.png (session.lock excluded)
+
+    let listed = list_world_backups(&backups_dir, "Basalt Survival").unwrap();
+    assert_eq!(listed.len(), 2);
+
+    let saves_with_count = list_saves_with_backups(&saves_dir, &backups_dir).unwrap();
+    let survival_summary = saves_with_count
+        .iter()
+        .find(|s| s.id == "Basalt Survival")
+        .unwrap();
+    assert_eq!(survival_summary.backup_count, 2);
+
+    // Mutate world and add an extra file, then restore b1 and verify exact rollback
+    fs::write(world_dir.join("level.dat"), b"corrupted-v2").unwrap();
+    fs::write(world_dir.join("region").join("r.0.0.mca"), b"chunk-v2").unwrap();
+    fs::write(world_dir.join("extra_dirty.txt"), b"should-vanish").unwrap();
+
+    let restored = restore_world_backup(&saves_dir, &backups_dir, &b1.filename).unwrap();
+    assert_eq!(restored.id, "Basalt Survival");
+    assert_eq!(restored.backup_count, 2);
+    assert_eq!(fs::read(world_dir.join("level.dat")).unwrap(), original_level_dat);
+    assert_eq!(
+        fs::read(world_dir.join("region").join("r.0.0.mca")).unwrap(),
+        b"chunk-v1"
+    );
+    assert!(!world_dir.join("extra_dirty.txt").exists());
+    assert!(world_dir.join("datapacks").is_dir());
+
+    // Delete world completely, then restore from backup b2
+    delete_save(&saves_dir, "Basalt Survival").unwrap();
+    assert!(!world_dir.exists());
+    let revived = restore_world_backup(&saves_dir, &backups_dir, &b2.filename).unwrap();
+    assert_eq!(revived.id, "Basalt Survival");
+    assert_eq!(fs::read(world_dir.join("level.dat")).unwrap(), original_level_dat);
+
+    // Zip-slip attack archive MUST be rejected without modifying the live world!
+    let evil_zip = build_stored_zip(&[
+        ("Basalt Survival/level.dat", b"evil"),
+        ("Basalt Survival/../../escape.txt", b"pwned"),
+    ])
+    .unwrap();
+    fs::write(backups_dir.join("evil_slip.zip"), &evil_zip).unwrap();
+    assert!(restore_world_backup(&saves_dir, &backups_dir, "evil_slip.zip").is_err());
+    assert!(!tmp.join("escape.txt").exists());
+    assert_eq!(fs::read(world_dir.join("level.dat")).unwrap(), original_level_dat);
+
+    // Corrupt CRC-32 archive MUST fail cleanly and keep existing world intact!
+    let mut corrupt_bytes = fs::read(backups_dir.join(&b1.filename)).unwrap();
+    // Flip a byte inside the stored "chunk-v1" payload so CRC-32 verification must reject it
+    let needle = b"chunk-v1";
+    let payload_pos = corrupt_bytes
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .expect("stored chunk-v1 payload should be present in archive");
+    corrupt_bytes[payload_pos] ^= 0xFF;
+    fs::write(backups_dir.join("corrupt_crc.zip"), &corrupt_bytes).unwrap();
+    let crc_err = restore_world_backup(&saves_dir, &backups_dir, "corrupt_crc.zip").unwrap_err();
+    assert!(crc_err.contains("CRC-32"), "unexpected error: {crc_err}");
+    assert_eq!(fs::read(world_dir.join("level.dat")).unwrap(), original_level_dat);
+    delete_world_backup(&backups_dir, "corrupt_crc.zip").unwrap();
+    delete_world_backup(&backups_dir, "evil_slip.zip").unwrap();
+
+    // Path traversal on backup filename & deletion
+    assert!(restore_world_backup(&saves_dir, &backups_dir, "../outside.zip").is_err());
+    assert!(delete_world_backup(&backups_dir, "../outside.zip").is_err());
+
+    delete_world_backup(&backups_dir, &b1.filename).unwrap();
+    assert_eq!(
+        list_world_backups(&backups_dir, "Basalt Survival")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn smart_crash_doctor_reads_recent_crash_report_and_diagnoses() {
+    let tmp = std::env::temp_dir().join(format!(
+        "basalt_crash_doctor_integration_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    let crash_dir = tmp.join("crash-reports");
+    fs::create_dir_all(&crash_dir).unwrap();
+
+    let report_path = crash_dir.join("crash-2026-11-26_22.30.00-client.txt");
+    fs::write(
+        &report_path,
+        concat!(
+            "---- Minecraft Crash Report ----\n",
+            "Description: Rendering overlay\n\n",
+            "org.spongepowered.asm.mixin.transformer.throwables.MixinApplyError: Mixin [sodium.mixins.json:core.WorldRendererMixin] from mod sodium FAILED\n",
+            "\tat net.minecraft.client.Minecraft.run(Minecraft.java:100)\n",
+            "Suspected Mods: Minecraft (minecraft), Sodium (sodium)\n"
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(
+        find_recent_crash_report(&tmp, Some(120)).as_deref(),
+        Some(report_path.as_path())
+    );
+
+    let diag = diagnose_crash(&["[main/INFO]: Game exited with code -1".to_string()], Some(&tmp), Some(120));
+    assert_eq!(diag.code, CrashCode::ModCrash);
+    assert_eq!(diag.severity, CrashSeverity::Error);
+    assert_eq!(diag.offending_mod.as_deref(), Some("sodium"));
+    assert!(diag.crash_report_path.is_some());
+    assert!(!diag.log_excerpt.is_empty());
+
+    // Verify JSON serialization produces exact snake_case code & severity names
+    let json = serde_json::to_value(&diag).unwrap();
+    assert_eq!(json["code"], "mod_crash");
+    assert_eq!(json["severity"], "error");
+    assert_eq!(json["offending_mod"], "sodium");
+
+    // Verify Forge stacktrace TRANSFORMER mod extraction
+    let forge_mod = diagnose_crash_text(
+        &[
+            "net.minecraftforge.fml.ModLoadingException: Create (create) has failed to load correctly".to_string(),
+            "\tat TRANSFORMER/create@0.5.1/com.simibubi.create.Create.<init>(Create.java:42)".to_string(),
+        ],
+        None,
+    );
+    assert_eq!(forge_mod.code, CrashCode::ModCrash);
+    assert_eq!(forge_mod.offending_mod.as_deref(), Some("create"));
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn screenshots_gallery_scan_dimensions_data_url_and_guards() {
+    let tmp = std::env::temp_dir().join(format!(
+        "basalt_screenshots_integration_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    let shots_dir = tmp.join("screenshots");
+    fs::create_dir_all(&shots_dir).unwrap();
+
+    // Create two valid PNGs of different dimensions + a non-PNG + a corrupt PNG
+    let img1 = ImageBuffer::from_pixel(320, 180, Rgba([20u8, 40, 60, 255]));
+    img1.save(shots_dir.join("2026-11-25_10.00.00.png")).unwrap();
+
+    let img2 = ImageBuffer::from_pixel(640, 360, Rgba([90u8, 150, 200, 255]));
+    img2.save(shots_dir.join("2026-11-26_12.30.00.png")).unwrap();
+
+    fs::write(shots_dir.join("not_a_png.txt"), b"hello").unwrap();
+    fs::write(shots_dir.join("corrupt.png"), b"not-real-png-data-at-all-123456").unwrap();
+
+    let list = list_screenshots(&tmp).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].filename, "2026-11-26_12.30.00.png");
+    assert_eq!((list[0].width, list[0].height), (640, 360));
+    assert_eq!(list[1].filename, "2026-11-25_10.00.00.png");
+    assert_eq!((list[1].width, list[1].height), (320, 180));
+
+    let data_url = read_screenshot_data_url(&tmp, "2026-11-26_12.30.00.png").unwrap();
+    assert!(data_url.starts_with("data:image/png;base64,"));
+
+    // Path traversal & non-PNG guards
+    assert!(resolve_screenshot_path(&tmp, "../secret.png").is_err());
+    assert!(read_screenshot_data_url(&tmp, "sub/2026-11-26_12.30.00.png").is_err());
+    assert!(read_screenshot_data_url(&tmp, "not_a_png.txt").is_err());
+    assert!(read_screenshot_data_url(&tmp, "corrupt.png").is_err());
+    assert!(delete_screenshot(&tmp, "..\\escape.png").is_err());
+
+    delete_screenshot(&tmp, "2026-11-25_10.00.00.png").unwrap();
+    let after_delete = list_screenshots(&tmp).unwrap();
+    assert_eq!(after_delete.len(), 1);
+    assert_eq!(after_delete[0].filename, "2026-11-26_12.30.00.png");
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn playtime_stats_atomic_persistence_and_corruption_fallback() {
+    let tmp = std::env::temp_dir().join(format!(
+        "basalt_playtime_integration_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    let stats_path = tmp.join("stats.json");
+
+    // Corrupt JSON should gracefully fall back to defaults instead of panicking
+    fs::create_dir_all(&tmp).unwrap();
+    fs::write(&stats_path, b"{not valid json").unwrap();
+    let fallback = load_playtime_stats(&stats_path);
+    assert_eq!(fallback.total_sessions, 0);
+    assert_eq!(fallback.total_playtime_secs, 0);
+
+    let after_first = record_playtime_session(&stats_path, Some("AlphaWorld"), 300).unwrap();
+    assert_eq!(after_first.total_playtime_secs, 300);
+    assert_eq!(after_first.total_sessions, 1);
+    assert_eq!(after_first.per_world["AlphaWorld"].playtime_secs, 300);
+    assert_eq!(after_first.per_world["AlphaWorld"].sessions, 1);
+    assert!(after_first.per_world["AlphaWorld"].last_played_epoch_secs > 0);
+
+    // Second atomic overwrite on Windows must replace existing stats.json cleanly
+    let after_second = record_playtime_session(&stats_path, Some("AlphaWorld"), 180).unwrap();
+    assert_eq!(after_second.total_playtime_secs, 480);
+    assert_eq!(after_second.total_sessions, 2);
+    assert_eq!(after_second.per_world["AlphaWorld"].playtime_secs, 480);
+    assert_eq!(after_second.per_world["AlphaWorld"].sessions, 2);
 
     let _ = fs::remove_dir_all(&tmp);
 }

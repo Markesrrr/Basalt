@@ -6,6 +6,7 @@ import {
   formatLocaleEpoch,
   formatLocaleNumber,
   toLocaleLowerFold,
+  toLocaleUpperSafe,
 } from "./formatting";
 import {
   ACCENT_LABELS,
@@ -21,6 +22,8 @@ import {
 import * as ipc from "./ipc";
 import {
   animateDialogOpen,
+  animateLightboxOpen,
+  animatePanelReveal,
   animateTextSwap,
   animateToastIn,
   animateViewHandoff,
@@ -46,6 +49,7 @@ import {
   type AccentTone,
   type BootstrapDto,
   type CornerStyle,
+  type CrashDiagnosis,
   type GraphicsSettings,
   type InstalledLibraryItem,
   type LaunchMode,
@@ -54,12 +58,15 @@ import {
   type LoaderKind,
   type MinecraftSaveSummary,
   type ModrinthSearchHit,
+  type ModUpdateInfo,
   type SavedServer,
+  type ScreenshotItem,
   type ServerPingInfo,
   type SkinModel,
   type ThemeMode,
   type UiLanguage,
   type VanillaEnvStatus,
+  type WorldBackupSummary,
 } from "./types";
 
 type ViewId = "play" | "library" | "worlds" | "profile" | "system";
@@ -80,6 +87,31 @@ let loaderSwitchSeq = 0;
 let versionSwitchSeq = 0;
 let libImportBusy = false;
 const installingProjects = new Set<string>();
+const installedUpdates = new Map<string, ModUpdateInfo>();
+let libUpdatesChecking = false;
+let libUpdatesCheckedScope = "";
+let libUpdatingAll = false;
+const updatingModFiles = new Set<string>();
+
+let worldsActiveTab: "saves" | "screenshots" = "saves";
+const expandedWorldBackups = new Set<string>();
+const worldBackupsCache = new Map<string, WorldBackupSummary[]>();
+const worldBackupsLoading = new Set<string>();
+const worldBackupBusy = new Set<string>();
+let pendingRestoreBackup: WorldBackupSummary | null = null;
+let lastRestoreDialogTrigger: HTMLElement | null = null;
+
+let screenshotItems: ScreenshotItem[] = [];
+let screenshotsLoaded = false;
+const screenshotUrlCache = new Map<string, string>();
+const screenshotUrlLoading = new Set<string>();
+let screenshotObserver: IntersectionObserver | null = null;
+let lightboxIndex = -1;
+let lightboxTriggerEl: HTMLElement | null = null;
+
+let lastCrashDiagnosis: CrashDiagnosis | null = null;
+const serverPingInFlight = new Set<string>();
+let initialServersAutoPinged = false;
 
 interface ServerCheckState {
   status: "idle" | "checking" | "online" | "error";
@@ -284,29 +316,233 @@ function validateUsername(raw: string): string | null {
   return null;
 }
 
+function md5Bytes(input: Uint8Array): Uint8Array {
+  const s = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+  ];
+  const K = new Uint32Array(64);
+  for (let i = 0; i < 64; i += 1) {
+    K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 0x100000000) >>> 0;
+  }
+
+  const origLen = input.length;
+  const paddedLen = ((origLen + 8) >> 6) * 64 + 64;
+  const msg = new Uint8Array(paddedLen);
+  msg.set(input);
+  msg[origLen] = 0x80;
+  const view = new DataView(msg.buffer);
+  const bitLenLo = (origLen * 8) >>> 0;
+  const bitLenHi = Math.floor((origLen * 8) / 0x100000000) >>> 0;
+  view.setUint32(paddedLen - 8, bitLenLo, true);
+  view.setUint32(paddedLen - 4, bitLenHi, true);
+
+  let a0 = 0x67452301;
+  let b0 = 0xefcdab89;
+  let c0 = 0x98badcfe;
+  let d0 = 0x10325476;
+
+  const M = new Uint32Array(16);
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let j = 0; j < 16; j += 1) {
+      M[j] = view.getUint32(offset + j * 4, true);
+    }
+    let A = a0;
+    let B = b0;
+    let C = c0;
+    let D = d0;
+    for (let i = 0; i < 64; i += 1) {
+      let F = 0;
+      let g = 0;
+      if (i < 16) {
+        F = (B & C) | (~B & D);
+        g = i;
+      } else if (i < 32) {
+        F = (D & B) | (~D & C);
+        g = (5 * i + 1) % 16;
+      } else if (i < 48) {
+        F = B ^ C ^ D;
+        g = (3 * i + 5) % 16;
+      } else {
+        F = C ^ (B | ~D);
+        g = (7 * i) % 16;
+      }
+      const sum = (F + A + K[i] + M[g]) >>> 0;
+      A = D;
+      D = C;
+      C = B;
+      const rot = s[i];
+      B = (B + ((sum << rot) | (sum >>> (32 - rot)))) >>> 0;
+    }
+    a0 = (a0 + A) >>> 0;
+    b0 = (b0 + B) >>> 0;
+    c0 = (c0 + C) >>> 0;
+    d0 = (d0 + D) >>> 0;
+  }
+
+  const digest = new Uint8Array(16);
+  const outView = new DataView(digest.buffer);
+  outView.setUint32(0, a0, true);
+  outView.setUint32(4, b0, true);
+  outView.setUint32(8, c0, true);
+  outView.setUint32(12, d0, true);
+  return digest;
+}
+
 function computeOfflineUuidPreview(username: string): string {
   const input = `OfflinePlayer:${username.trim() || "Player"}`;
-  let h1 = 0x811c9dc5;
-  let h2 = 0x01000193;
-  let h3 = 0x9e3779b9;
-  let h4 = 0x85ebca6b;
-  for (let i = 0; i < input.length; i++) {
-    const c = input.charCodeAt(i);
-    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
-    h2 = Math.imul(h2 ^ ((c << 3) | (c >>> 5)), 0x85ebca6b) >>> 0;
-    h3 = Math.imul(h3 ^ (c + i * 17), 0xc2b2ae35) >>> 0;
-    h4 = Math.imul(h4 ^ (c * 31 + i), 0x27d4eb2f) >>> 0;
+  const bytes = md5Bytes(new TextEncoder().encode(input));
+  // RFC 4122 version 3 (MD5) & IETF variant
+  bytes[6] = (bytes[6] & 0x0f) | 0x30;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
+
+function formatPlaytime(secs: number, lang: UiLanguage): string {
+  if (!Number.isFinite(secs) || secs <= 0) return "";
+  if (secs < 60) return tr(lang, "playtime.lessThanMin");
+  const totalMins = Math.floor(secs / 60);
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  if (h > 0) {
+    return tr(lang, "playtime.hoursMins", {
+      h: formatLocaleNumber(h, lang, 0),
+      m: formatLocaleNumber(m, lang, 0),
+    });
   }
-  // Set version 3 (0x3000) and IETF variant (0x8000)
-  const p1 = h1.toString(16).padStart(8, "0");
-  const p2 = ((h2 >>> 16) & 0xffff).toString(16).padStart(4, "0");
-  const p3 = (((h2 & 0x0fff) | 0x3000) >>> 0).toString(16).padStart(4, "0");
-  const p4 = ((((h3 >>> 16) & 0x3fff) | 0x8000) >>> 0).toString(16).padStart(4, "0");
-  const p5 = (
-    ((h3 & 0xffff).toString(16).padStart(4, "0")) +
-    h4.toString(16).padStart(8, "0")
-  ).slice(0, 12);
-  return `${p1}-${p2}-${p3}-${p4}-${p5}`;
+  return tr(lang, "playtime.minsOnly", { m: formatLocaleNumber(m, lang, 0) });
+}
+
+function shortJavaLabel(vanilla: VanillaEnvStatus, lang: UiLanguage): string {
+  if (!vanilla.java_ready) return tr(lang, "play.specJdkMissing");
+  const m = /Java\s+(\d+)/i.exec(vanilla.java_version_label || "");
+  if (m) return `Java ${m[1]}`;
+  return vanilla.java_version_label || "Java 21";
+}
+
+function validateServerAddress(raw: string): string | null {
+  const lang = getEffectiveLanguage();
+  const trimmed = raw.trim();
+  if (!trimmed) return tr(lang, "servers.addrEmpty");
+  if (/\s/.test(trimmed) || /[\u0000-\u001f]/.test(trimmed)) {
+    return tr(lang, "servers.addrInvalid");
+  }
+
+  let host = trimmed;
+  let portStr: string | null = null;
+  if (trimmed.startsWith("[")) {
+    const closeIdx = trimmed.indexOf("]");
+    if (closeIdx < 2) return tr(lang, "servers.addrInvalid");
+    host = trimmed.slice(1, closeIdx);
+    const rest = trimmed.slice(closeIdx + 1);
+    if (rest.length > 0) {
+      if (!rest.startsWith(":")) return tr(lang, "servers.addrInvalid");
+      portStr = rest.slice(1);
+    }
+    if (!/^[0-9a-fA-F:]+$/.test(host) || !host.includes(":")) {
+      return tr(lang, "servers.addrInvalid");
+    }
+  } else {
+    const firstColon = trimmed.indexOf(":");
+    const lastColon = trimmed.lastIndexOf(":");
+    if (firstColon !== lastColon) {
+      return tr(lang, "servers.addrInvalid");
+    }
+    if (firstColon >= 0) {
+      host = trimmed.slice(0, firstColon);
+      portStr = trimmed.slice(firstColon + 1);
+    }
+    if (!host || host.length > 253) return tr(lang, "servers.addrInvalid");
+    const isIpv4 = /^(\d{1,3}\.){3}\d{1,3}$/.test(host);
+    if (isIpv4) {
+      const octets = host.split(".").map(Number);
+      if (octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) {
+        return tr(lang, "servers.addrInvalid");
+      }
+    } else if (
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/.test(host)
+    ) {
+      return tr(lang, "servers.addrInvalid");
+    }
+  }
+
+  if (portStr !== null) {
+    if (!/^\d{1,5}$/.test(portStr)) return tr(lang, "servers.addrInvalid");
+    const portNum = Number(portStr);
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      return tr(lang, "servers.addrInvalid");
+    }
+  }
+  return null;
+}
+
+function sanitizePathForDiag(p: string): string {
+  return p
+    .replace(/([A-Za-z]:\\Users\\)[^\\]+/gi, "$1<USER>")
+    .replace(/(\/home\/)[^/]+/g, "$1<USER>")
+    .replace(/(\/Users\/)[^/]+/g, "$1<USER>");
+}
+
+function buildLaunchDiagnosticsText(): string {
+  if (!state) return "Basalt Launcher Diagnostics (no state loaded)";
+  const { config, hardware, vanilla, loader_status, library_counts, playtime_stats } = state;
+  const loaderVer =
+    config.mod_loader === "Fabric"
+      ? loader_status?.fabricLoaderVersion ?? "unprepared"
+      : config.mod_loader === "Forge"
+      ? loader_status?.forgeVersion ?? "unprepared"
+      : "none";
+  const lines: string[] = [
+    "=== Basalt Launcher Diagnostics ===",
+    `Timestamp: ${new Date().toISOString()}`,
+    `Minecraft: ${config.mc_version} | Loader: ${config.mod_loader} (${loaderVer})`,
+    `Java: ${vanilla.java_ready ? vanilla.java_version_label : "MISSING"}`,
+    `JVM: -Xmx${config.graphics.jvm_ram_mb}M | GC: ${config.graphics.jvm_gc} | NetBoost: ${config.network_boost} | ProcBoost: ${config.process_boost}`,
+    `Graphics: Preset=${config.graphics.preset}, Render=${config.graphics.render_distance}, Sim=${config.graphics.simulation_distance}, FOV=${config.graphics.fov_degrees}, VSync=${config.graphics.vsync}, MaxFPS=${config.graphics.max_fps}`,
+    `Hardware: ${hardware.cpu_name} (${hardware.physical_cores}C/${hardware.logical_cores}T) | RAM ${hardware.available_ram_mb}/${hardware.total_ram_mb} MB`,
+    `GPU: ${hardware.gpu_name} (${hardware.gpu_backend}, ${hardware.gpu_device_type})`,
+    `Library: Mods ${library_counts?.modsEnabled ?? 0}/${library_counts?.modsTotal ?? 0} | Shaders ${library_counts?.shadersEnabled ?? 0}/${library_counts?.shadersTotal ?? 0} | Packs ${library_counts?.resourcepacksEnabled ?? 0}/${library_counts?.resourcepacksTotal ?? 0}`,
+    `Saves: ${state.saves.length} | Servers: ${config.saved_servers.length} | Playtime: ${playtime_stats?.total_playtime_secs ?? 0}s (${playtime_stats?.total_sessions ?? 0} sessions)`,
+  ];
+  if (lastCrashDiagnosis) {
+    lines.push(
+      "--- Latest Crash Doctor Diagnosis ---",
+      `Code: ${lastCrashDiagnosis.code} (${lastCrashDiagnosis.severity})`,
+      ...(lastCrashDiagnosis.offending_mod ? [`Suspected Mod: ${lastCrashDiagnosis.offending_mod}`] : []),
+      `Details: ${sanitizePathForDiag(lastCrashDiagnosis.details)}`,
+      ...(lastCrashDiagnosis.log_excerpt.length > 0
+        ? ["Excerpt:", ...lastCrashDiagnosis.log_excerpt.slice(0, 6).map((l) => `  ${sanitizePathForDiag(l)}`)]
+        : [])
+    );
+  }
+  return lines.join("\n");
+}
+
+async function handleCopyDiagnostics(): Promise<void> {
+  const lang = getEffectiveLanguage();
+  const text = buildLaunchDiagnosticsText();
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    playMcSound("click");
+    showToast(tr(lang, "diag.copiedToast"), "success");
+  } catch {
+    playMcSound("error");
+    showToast(tr(lang, "diag.copyFailedToast"), "error");
+  }
 }
 
 function setSelectNumericValue(select: HTMLSelectElement, targetValue: number, unit: "MB" | "FPS" = "MB"): void {
@@ -591,6 +827,15 @@ function setActiveView(view: ViewId, updateHash = true, withSound = false): void
       void loadLibraryInstalled();
     }
   }
+  if (view === "worlds" && state && !screenshotsLoaded) {
+    void loadScreenshots(false);
+  }
+  if (view === "system" && state) {
+    const netPanel = document.querySelector<HTMLElement>('[data-settings-panel="network"]');
+    if (netPanel && !netPanel.hidden) {
+      void autoPingSavedServers(false);
+    }
+  }
   if (withSound && changed) {
     playMcSound("tab");
   }
@@ -633,9 +878,6 @@ function syncVersionUi(): void {
 
   const railPlayerVer = document.getElementById("rail-player-ver");
   if (railPlayerVer) railPlayerVer.textContent = `${ver} · ${loader}`;
-
-  const launchHeroVer = document.getElementById("launch-version-hero");
-  if (launchHeroVer) launchHeroVer.textContent = `${ver} · ${loader}`;
 
   const stageKicker = document.getElementById("stage-kicker");
   if (stageKicker) stageKicker.textContent = `${loader.toUpperCase()} · ${ver}`;
@@ -686,7 +928,7 @@ function renderTopbarAndSession(): void {
   }
   const rtJava = document.getElementById("rail-rt-java");
   if (rtJava) {
-    rtJava.textContent = state.vanilla.java_ready ? "Java 21" : tr(lang, "play.specJdkMissing");
+    rtJava.textContent = shortJavaLabel(state.vanilla, lang);
   }
   const rtCache = document.getElementById("rail-rt-cache");
   if (rtCache) {
@@ -860,10 +1102,15 @@ function renderRailTargets(): void {
   }
 
   for (const srv of config.saved_servers.slice(0, 4)) {
+    const check = serverChecks.get(srv.address);
+    const liveSub =
+      check?.status === "online" && check.ping
+        ? `${check.ping.latency_ms} ms · ${check.ping.online_players}/${check.ping.max_players}`
+        : tr(lang, "rail.serverSub", { addr: srv.address });
     appendTarget({
       kind: "server",
       title: srv.name,
-      sub: tr(lang, "rail.serverSub", { addr: srv.address }),
+      sub: liveSub,
       active: false,
       onSelect: () => {
         setActiveView("system", true, true);
@@ -918,6 +1165,19 @@ function renderPlayView(): void {
     });
   }
 
+  const playTimePill = document.getElementById("play-playtime-pill");
+  if (playTimePill) {
+    const totalSecs = state.playtime_stats?.total_playtime_secs ?? 0;
+    if (totalSecs > 0) {
+      playTimePill.textContent = tr(lang, "playtime.totalBadge", {
+        time: formatPlaytime(totalSecs, lang),
+      });
+      playTimePill.hidden = false;
+    } else {
+      playTimePill.hidden = true;
+    }
+  }
+
   const playSkinCanvas = document.getElementById("play-skin-canvas");
   if (playSkinCanvas instanceof HTMLCanvasElement) {
     if (!playSkin3d) {
@@ -925,6 +1185,10 @@ function renderPlayView(): void {
         interactive: true,
         trackCursor: true,
         onClickFlip: () => playMcSound("tab"),
+        onResetPose: () => {
+          playMcSound("click");
+          showToast(tr(getEffectiveLanguage(), "skin.poseResetToast"), "neutral");
+        },
       });
     }
     playSkin3d.setReducedMotion(getEffectiveMotion() === "none");
@@ -969,9 +1233,7 @@ function renderPlayView(): void {
   }
   select.value = activeSaveId ?? "";
 
-  byId<HTMLElement>("play-spec-jdk").textContent = vanilla.java_ready
-    ? "Java 21"
-    : tr(lang, "play.specJdkMissing");
+  byId<HTMLElement>("play-spec-jdk").textContent = shortJavaLabel(vanilla, lang);
   byId<HTMLElement>("play-spec-ram").textContent = `${config.graphics.jvm_ram_mb} MB (${config.graphics.jvm_gc})`;
   byId<HTMLElement>("play-spec-chunks").textContent = tr(lang, "play.chunksValue", {
     n: config.graphics.render_distance,
@@ -1060,7 +1322,37 @@ function renderPlayView(): void {
       const art = document.createElement("div");
       art.className = "recent-jump-art";
       art.setAttribute("aria-hidden", "true");
-      art.innerHTML = `<svg class="ico"><use href="#${item.kind === "world" ? "ico-cube" : "ico-server"}" /></svg>`;
+      if (item.kind === "world" && item.saveId) {
+        const matchedSave = saves.find((s) => s.id === item.saveId);
+        if (matchedSave?.icon_data_url) {
+          const img = document.createElement("img");
+          img.src = matchedSave.icon_data_url;
+          img.alt = "";
+          img.style.width = "100%";
+          img.style.height = "100%";
+          img.style.objectFit = "cover";
+          img.style.borderRadius = "inherit";
+          art.appendChild(img);
+        } else {
+          art.innerHTML = `<svg class="ico"><use href="#ico-cube" /></svg>`;
+        }
+      } else if (item.kind === "server" && item.serverAddr) {
+        const srvCheck = serverChecks.get(item.serverAddr);
+        if (srvCheck?.status === "online" && srvCheck.ping?.favicon?.startsWith("data:image/png;base64,")) {
+          const img = document.createElement("img");
+          img.src = srvCheck.ping.favicon;
+          img.alt = "";
+          img.style.width = "100%";
+          img.style.height = "100%";
+          img.style.objectFit = "cover";
+          img.style.borderRadius = "inherit";
+          art.appendChild(img);
+        } else {
+          art.innerHTML = `<svg class="ico"><use href="#ico-server" /></svg>`;
+        }
+      } else {
+        art.innerHTML = `<svg class="ico"><use href="#ico-cube" /></svg>`;
+      }
 
       const copy = document.createElement("div");
       copy.className = "recent-jump-copy";
@@ -1080,9 +1372,26 @@ function renderPlayView(): void {
 
       const metaLine = document.createElement("div");
       metaLine.className = "recent-jump-meta tabular";
-      metaLine.textContent = item.meta;
+      if (item.kind === "server" && item.serverAddr) {
+        const srvCheck = serverChecks.get(item.serverAddr);
+        if (srvCheck?.status === "online" && srvCheck.ping) {
+          metaLine.textContent = `${srvCheck.ping.latency_ms} ms · ${srvCheck.ping.online_players}/${srvCheck.ping.max_players} · ${item.serverAddr}`;
+        } else if (srvCheck?.status === "error") {
+          metaLine.textContent = `${tr(lang, "servers.statusOffline")} · ${item.serverAddr}`;
+        } else {
+          metaLine.textContent = item.meta;
+        }
+      } else {
+        metaLine.textContent = item.meta;
+      }
 
       copy.append(titleLine, metaLine);
+      if (item.kind === "server" && item.serverAddr) {
+        const srvCheck = serverChecks.get(item.serverAddr);
+        if (srvCheck && srvCheck.status !== "idle") {
+          copy.appendChild(createServerPingPill(srvCheck, lang));
+        }
+      }
 
       const actionBtn = document.createElement("button");
       actionBtn.type = "button";
@@ -1190,7 +1499,7 @@ function buildDeckCards(): DeckCard[] {
     {
       id: "nav:worlds",
       kind: "nav",
-      kicker: tr(lang, "worlds.heading").toUpperCase(),
+      kicker: toLocaleUpperSafe(tr(lang, "worlds.heading"), lang),
       title: tr(lang, "worlds.heading"),
       meta:
         saves.length === 1
@@ -1213,7 +1522,7 @@ function buildDeckCards(): DeckCard[] {
         shaders: state.library_counts?.shadersEnabled ?? 0,
       }),
       sub: tr(lang, "library.subtitle"),
-      tag: tr(lang, "nav.library").toUpperCase(),
+      tag: toLocaleUpperSafe(tr(lang, "nav.library"), lang),
       seedKey: "nav-library",
       primaryLabel: tr(lang, "nav.library"),
       secondaryLabel: tr(lang, "play.manageSaves"),
@@ -1228,7 +1537,7 @@ function buildDeckCards(): DeckCard[] {
         theme: THEME_SHORT_LABELS[lang][getEffectiveTheme()],
       }),
       sub: tr(lang, "deck.cardNavProfileSub"),
-      tag: tr(lang, "nav.profile").toUpperCase(),
+      tag: toLocaleUpperSafe(tr(lang, "nav.profile"), lang),
       seedKey: "nav-profile",
       primaryLabel: tr(lang, "deck.cardNavProfilePrimary"),
       secondaryLabel: tr(lang, "play.manageSaves"),
@@ -1237,11 +1546,11 @@ function buildDeckCards(): DeckCard[] {
     {
       id: "nav:system",
       kind: "nav",
-      kicker: tr(lang, "system.heading").toUpperCase(),
+      kicker: toLocaleUpperSafe(tr(lang, "system.heading"), lang),
       title: tr(lang, "deck.cardNavSystemTitle"),
       meta: `${hardware.physical_cores}C/${hardware.logical_cores}T · ${Math.round(hardware.total_ram_mb / 1024)} GB`,
       sub: tr(lang, "deck.cardNavSystemSub"),
-      tag: tr(lang, "nav.system").toUpperCase(),
+      tag: toLocaleUpperSafe(tr(lang, "nav.system"), lang),
       seedKey: "nav-system",
       primaryLabel: tr(lang, "deck.cardNavSystemPrimary"),
       secondaryLabel: tr(lang, "deck.cardNavProfilePrimary"),
@@ -1276,15 +1585,11 @@ function renderConsoleHero(card: DeckCard): void {
 
   const specsEl = byId<HTMLElement>("deck-hero-specs");
   specsEl.innerHTML = "";
-  appendHeroSpec(
-    specsEl,
-    "JDK",
-    vanilla.java_ready ? "Java 21" : tr(lang, "play.specJdkMissing")
-  );
+  appendHeroSpec(specsEl, "JDK", shortJavaLabel(vanilla, lang));
   appendHeroSpec(specsEl, "JVM RAM", `${config.graphics.jvm_ram_mb} MB`);
   appendHeroSpec(
     specsEl,
-    tr(lang, "system.renderDist").toUpperCase(),
+    toLocaleUpperSafe(tr(lang, "system.renderDist"), lang),
     tr(lang, "play.chunksValue", { n: config.graphics.render_distance })
   );
   appendHeroSpec(
@@ -1335,6 +1640,10 @@ function renderConsoleHero(card: DeckCard): void {
       interactive: true,
       trackCursor: true,
       onClickFlip: () => playMcSound("tab"),
+      onResetPose: () => {
+        playMcSound("click");
+        showToast(tr(getEffectiveLanguage(), "skin.poseResetToast"), "neutral");
+      },
     });
   }
   deckSkin3d.setReducedMotion(getEffectiveMotion() === "none");
@@ -1548,10 +1857,589 @@ function toggleUiSound(desired?: boolean): void {
   void saveAccessibilityPrefs({ ui_sounds: nextDesktopSound });
 }
 
+function createServerPingPill(check: ServerCheckState, lang: UiLanguage): HTMLSpanElement {
+  const pill = document.createElement("span");
+  pill.className = "server-ping-pill";
+
+  const dot = document.createElement("span");
+  dot.className = "server-ping-dot";
+  dot.setAttribute("aria-hidden", "true");
+  pill.appendChild(dot);
+
+  if (check.status === "checking") {
+    pill.dataset.status = "pinging";
+    const lbl = document.createElement("span");
+    lbl.textContent = tr(lang, "servers.statusPinging");
+    pill.appendChild(lbl);
+  } else if (check.status === "online" && check.ping) {
+    pill.dataset.status = check.ping.latency_ms >= 150 ? "degraded" : "online";
+    const ms = document.createElement("span");
+    ms.className = "server-ping-ms";
+    ms.textContent = `${formatLocaleNumber(check.ping.latency_ms, lang, 0)} ms`;
+    const players = document.createElement("span");
+    players.className = "server-ping-players";
+    players.textContent = tr(lang, "servers.playersLabel", {
+      online: formatLocaleNumber(check.ping.online_players, lang, 0),
+      max: formatLocaleNumber(check.ping.max_players, lang, 0),
+    });
+    pill.append(ms, players);
+  } else {
+    pill.dataset.status = "offline";
+    const lbl = document.createElement("span");
+    lbl.textContent = tr(lang, "servers.statusOffline");
+    pill.appendChild(lbl);
+  }
+  return pill;
+}
+
+function renderCrashDoctor(animate = false): void {
+  const host = document.getElementById("crash-doctor-host");
+  if (!host) return;
+  if (!lastCrashDiagnosis) {
+    host.innerHTML = "";
+    host.hidden = true;
+    return;
+  }
+
+  const diag = lastCrashDiagnosis;
+  const lang = getEffectiveLanguage();
+  host.innerHTML = "";
+  host.hidden = false;
+
+  const card = document.createElement("section");
+  card.className = `crash-doctor-card crash-doctor-card--${diag.severity}`;
+  card.dataset.severity = diag.severity;
+  card.setAttribute("role", "region");
+  card.setAttribute("aria-label", tr(lang, "crash.btnLabel"));
+
+  const head = document.createElement("div");
+  head.className = "crash-doctor-head";
+
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "crash-doctor-title-group";
+
+  const badge = document.createElement("span");
+  badge.className = "crash-doctor-badge";
+  badge.textContent = tr(lang, `crash.sev.${diag.severity}`);
+
+  const title = document.createElement("strong");
+  title.className = "crash-doctor-title";
+  title.textContent = tr(lang, `crash.title.${diag.code}`);
+
+  const codeSpan = document.createElement("span");
+  codeSpan.className = "crash-doctor-code";
+  codeSpan.textContent = diag.code;
+
+  titleGroup.append(badge, title, codeSpan);
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.type = "button";
+  dismissBtn.className = "btn-icon";
+  dismissBtn.setAttribute("aria-label", tr(lang, "crash.dismissAria"));
+  dismissBtn.innerHTML = `<svg class="ico small" aria-hidden="true"><use href="#ico-close" /></svg>`;
+  dismissBtn.addEventListener("click", () => {
+    lastCrashDiagnosis = null;
+    renderCrashDoctor(false);
+  });
+
+  head.append(titleGroup, dismissBtn);
+
+  const body = document.createElement("div");
+  body.className = "crash-doctor-body";
+
+  if (diag.offending_mod) {
+    const modPill = document.createElement("span");
+    modPill.className = "crash-doctor-mod-pill";
+    const modLbl = document.createElement("strong");
+    modLbl.textContent = `${tr(lang, "crash.modLabel")}:`;
+    const modVal = document.createElement("span");
+    modVal.textContent = diag.offending_mod;
+    modPill.append(modLbl, modVal);
+    body.appendChild(modPill);
+  }
+
+  const details = document.createElement("p");
+  details.className = "crash-doctor-details";
+  const localizedDesc = tr(lang, `crash.desc.${diag.code}`);
+  details.textContent = diag.details ? `${localizedDesc} (${diag.details})` : localizedDesc;
+
+  const suggestion = document.createElement("p");
+  suggestion.className = "crash-doctor-suggestion";
+  suggestion.textContent = tr(lang, `crash.act.${diag.code}`);
+
+  body.append(details, suggestion);
+
+  if (diag.log_excerpt && diag.log_excerpt.length > 0) {
+    const pre = document.createElement("pre");
+    pre.className = "crash-doctor-excerpt tabular";
+    pre.textContent = diag.log_excerpt.join("\n");
+    body.appendChild(pre);
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "crash-doctor-actions";
+
+  const addActionBtn = (label: string, primary: boolean, onClick: () => void): void => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = primary ? "btn-primary btn-sm" : "btn-secondary btn-sm";
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    actions.appendChild(b);
+  };
+
+  if (diag.code === "out_of_memory") {
+    addActionBtn(tr(lang, "crash.btnOpenRam"), true, () => {
+      setActiveView("system", true, true);
+      document.querySelector<HTMLButtonElement>('[data-settings-tab="game"]')?.click();
+      requestAnimationFrame(() => document.getElementById("gfx-jvm-ram")?.focus());
+    });
+  } else if (diag.code === "mod_crash" || diag.code === "missing_mod_dependency") {
+    addActionBtn(tr(lang, "crash.btnOpenMods"), true, () => {
+      libActiveTab = "installed";
+      libInstalledKind = "mod";
+      setActiveView("library", true, true);
+      void loadLibraryInstalled();
+    });
+  } else if (diag.code === "java_version_mismatch" || diag.code === "gpu_driver_opengl") {
+    addActionBtn(tr(lang, "crash.btnOpenGame"), true, () => {
+      setActiveView("system", true, true);
+      document.querySelector<HTMLButtonElement>('[data-settings-tab="game"]')?.click();
+    });
+  } else if (diag.code === "corrupt_asset_or_jar") {
+    addActionBtn(tr(lang, "crash.btnVerify"), true, () => {
+      void handlePrepareVanilla();
+    });
+  } else if (diag.code === "session_lock") {
+    addActionBtn(tr(lang, "crash.btnOpenFolder"), true, () => {
+      void handleOpenGameFolder();
+    });
+  }
+
+  addActionBtn(tr(lang, "diag.copyBtn"), false, () => {
+    void handleCopyDiagnostics();
+  });
+
+  card.append(head, body, actions);
+  host.appendChild(card);
+
+  if (animate) {
+    animatePanelReveal(card, getEffectiveMotion(), "down");
+  }
+}
+
+async function handleRunCrashDoctor(): Promise<void> {
+  unlockAudioContext();
+  playMcSound("click");
+  const lang = getEffectiveLanguage();
+  try {
+    const diag = await ipc.diagnoseLastCrash();
+    if (!diag) {
+      lastCrashDiagnosis = null;
+      renderCrashDoctor(false);
+      showToast(tr(lang, "crash.noCrashFound"), "neutral");
+      return;
+    }
+    lastCrashDiagnosis = diag;
+    setActiveView("play", true, false);
+    renderCrashDoctor(true);
+    document.getElementById("crash-doctor-host")?.scrollIntoView({ behavior: getEffectiveMotion() === "none" ? "auto" : "smooth", block: "nearest" });
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  }
+}
+
+function setWorldsSubTab(tab: "saves" | "screenshots", withSound = false): void {
+  const changed = worldsActiveTab !== tab;
+  worldsActiveTab = tab;
+  for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-worlds-tab]"))) {
+    const active = btn.dataset.worldsTab === tab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  const savesPanel = document.getElementById("worlds-saves-panel");
+  const shotsPanel = document.getElementById("worlds-screenshots-panel");
+  if (savesPanel) savesPanel.hidden = tab !== "saves";
+  if (shotsPanel) shotsPanel.hidden = tab !== "screenshots";
+  if (changed) {
+    const incoming = tab === "screenshots" ? shotsPanel : savesPanel;
+    if (incoming) animateViewHandoff(incoming, getEffectiveMotion());
+    if (withSound) playMcSound("tab");
+  }
+  if (tab === "screenshots" && !screenshotsLoaded) {
+    void loadScreenshots(false);
+  } else if (tab === "screenshots") {
+    renderScreenshotsGallery();
+  }
+  syncSlidingIndicators();
+}
+
+function syncScreenshotsCountBadges(): void {
+  const lang = getEffectiveLanguage();
+  const count = screenshotItems.length;
+  const badge = document.getElementById("screenshots-count-badge");
+  if (badge) badge.textContent = String(count);
+  const toolbarCount = document.getElementById("screenshots-toolbar-count");
+  if (toolbarCount) {
+    toolbarCount.textContent =
+      count === 1
+        ? tr(lang, "gallery.countOne")
+        : tr(lang, "gallery.countLabel", { count: formatLocaleNumber(count, lang, 0) });
+  }
+}
+
+async function ensureScreenshotDataUrl(filename: string, imgEl?: HTMLImageElement): Promise<string | null> {
+  const cached = screenshotUrlCache.get(filename);
+  if (cached) {
+    if (imgEl && imgEl.src !== cached) imgEl.src = cached;
+    return cached;
+  }
+  if (screenshotUrlLoading.has(filename)) return null;
+  screenshotUrlLoading.add(filename);
+  try {
+    const dataUrl = await ipc.readScreenshotDataUrl(filename);
+    screenshotUrlCache.set(filename, dataUrl);
+    if (imgEl && imgEl.isConnected) {
+      imgEl.src = dataUrl;
+    }
+    return dataUrl;
+  } catch {
+    return null;
+  } finally {
+    screenshotUrlLoading.delete(filename);
+  }
+}
+
+async function loadScreenshots(showToastOnDone = false): Promise<void> {
+  try {
+    screenshotItems = await ipc.listScreenshots();
+    screenshotsLoaded = true;
+    syncScreenshotsCountBadges();
+    renderScreenshotsGallery();
+    if (showToastOnDone) {
+      showToast(tr(getEffectiveLanguage(), "worlds.refreshed"), "success");
+    }
+  } catch (err) {
+    showToast(errorMessage(err), "error");
+  }
+}
+
+function renderScreenshotsGallery(): void {
+  const grid = document.getElementById("screenshots-grid");
+  const emptyEl = document.getElementById("screenshots-empty");
+  if (!grid || !emptyEl) return;
+  const lang = getEffectiveLanguage();
+  syncScreenshotsCountBadges();
+
+  if (screenshotObserver) {
+    screenshotObserver.disconnect();
+    screenshotObserver = null;
+  }
+  grid.innerHTML = "";
+
+  if (screenshotItems.length === 0) {
+    emptyEl.hidden = false;
+    return;
+  }
+  emptyEl.hidden = true;
+
+  if (typeof IntersectionObserver !== "undefined") {
+    screenshotObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const img = entry.target as HTMLImageElement;
+          const fname = img.dataset.shotFile;
+          if (fname) {
+            screenshotObserver?.unobserve(img);
+            void ensureScreenshotDataUrl(fname, img);
+          }
+        }
+      },
+      { rootMargin: "120px" }
+    );
+  }
+
+  screenshotItems.forEach((shot, idx) => {
+    const card = document.createElement("article");
+    card.className = "gallery-card";
+    card.setAttribute("role", "listitem");
+
+    const mediaBtn = document.createElement("button");
+    mediaBtn.type = "button";
+    mediaBtn.className = "gallery-card-media";
+    mediaBtn.setAttribute("aria-label", shot.filename);
+    mediaBtn.addEventListener("click", () => {
+      void openLightbox(idx, mediaBtn);
+    });
+
+    const img = document.createElement("img");
+    img.alt = shot.filename;
+    img.dataset.shotFile = shot.filename;
+    const cachedUrl = screenshotUrlCache.get(shot.filename);
+    if (cachedUrl) {
+      img.src = cachedUrl;
+    } else if (screenshotObserver) {
+      screenshotObserver.observe(img);
+    } else {
+      void ensureScreenshotDataUrl(shot.filename, img);
+    }
+
+    const resBadge = document.createElement("span");
+    resBadge.className = "gallery-card-res";
+    resBadge.textContent = `${shot.width}×${shot.height}`;
+
+    mediaBtn.append(img, resBadge);
+
+    const meta = document.createElement("div");
+    meta.className = "gallery-card-meta";
+
+    const info = document.createElement("div");
+    info.className = "gallery-card-info";
+    const nameEl = document.createElement("span");
+    nameEl.className = "gallery-card-name";
+    nameEl.title = shot.filename;
+    nameEl.textContent = shot.filename;
+    const dateEl = document.createElement("span");
+    dateEl.className = "gallery-card-date";
+    dateEl.textContent = `${formatEpoch(shot.modified_epoch_secs)} · ${formatBytes(shot.size_bytes)}`;
+    info.append(nameEl, dateEl);
+
+    const actions = document.createElement("div");
+    actions.className = "gallery-card-actions";
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "btn-danger btn-sm";
+    delBtn.textContent = tr(lang, "gallery.deleteBtn");
+    delBtn.addEventListener("click", () => {
+      void handleDeleteScreenshot(shot.filename);
+    });
+    actions.appendChild(delBtn);
+
+    meta.append(info, actions);
+    card.append(mediaBtn, meta);
+    grid.appendChild(card);
+  });
+}
+
+async function renderLightboxFrame(): Promise<void> {
+  if (lightboxIndex < 0 || lightboxIndex >= screenshotItems.length) return;
+  const shot = screenshotItems[lightboxIndex];
+  byId<HTMLElement>("lightbox-name").textContent = shot.filename;
+  byId<HTMLElement>("lightbox-meta").textContent = `${shot.width}×${shot.height} · ${formatBytes(shot.size_bytes)} · ${formatEpoch(shot.modified_epoch_secs)}`;
+  byId<HTMLElement>("lightbox-counter").textContent = `${lightboxIndex + 1} / ${screenshotItems.length}`;
+  byId<HTMLButtonElement>("btn-lightbox-prev").disabled = screenshotItems.length <= 1;
+  byId<HTMLButtonElement>("btn-lightbox-next").disabled = screenshotItems.length <= 1;
+
+  const imgEl = byId<HTMLImageElement>("lightbox-img");
+  imgEl.alt = shot.filename;
+  const cached = screenshotUrlCache.get(shot.filename);
+  if (cached) {
+    imgEl.src = cached;
+  } else {
+    imgEl.removeAttribute("src");
+    const loaded = await ensureScreenshotDataUrl(shot.filename);
+    if (loaded && lightboxIndex >= 0 && screenshotItems[lightboxIndex]?.filename === shot.filename) {
+      imgEl.src = loaded;
+    }
+  }
+}
+
+async function openLightbox(index: number, trigger?: HTMLElement): Promise<void> {
+  if (index < 0 || index >= screenshotItems.length) return;
+  lightboxIndex = index;
+  lightboxTriggerEl = trigger ?? null;
+  const dlg = byId<HTMLDialogElement>("gallery-lightbox");
+  if (!dlg.open) {
+    dlg.showModal();
+    animateLightboxOpen(dlg, getEffectiveMotion());
+  }
+  await renderLightboxFrame();
+}
+
+function stepLightbox(delta: -1 | 1): void {
+  if (screenshotItems.length <= 1 || lightboxIndex < 0) return;
+  lightboxIndex = (lightboxIndex + delta + screenshotItems.length) % screenshotItems.length;
+  playMcSound("focus");
+  void renderLightboxFrame();
+}
+
+async function handleDeleteScreenshot(filename: string): Promise<void> {
+  try {
+    await ipc.deleteScreenshot(filename);
+    screenshotUrlCache.delete(filename);
+    screenshotItems = screenshotItems.filter((s) => s.filename !== filename);
+    playMcSound("click");
+    showToast(tr(getEffectiveLanguage(), "gallery.deletedToast"), "success");
+    renderScreenshotsGallery();
+
+    const dlg = document.getElementById("gallery-lightbox");
+    if (dlg instanceof HTMLDialogElement && dlg.open) {
+      if (screenshotItems.length === 0) {
+        lightboxIndex = -1;
+        dlg.close();
+      } else {
+        lightboxIndex = Math.min(lightboxIndex, screenshotItems.length - 1);
+        await renderLightboxFrame();
+      }
+    }
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  }
+}
+
+async function loadWorldBackups(saveId: string): Promise<void> {
+  worldBackupsLoading.add(saveId);
+  renderWorldsView();
+  try {
+    const items = await ipc.listWorldBackups(saveId);
+    worldBackupsCache.set(saveId, items);
+    const matched = state?.saves.find((s) => s.id === saveId);
+    if (matched) matched.backup_count = items.length;
+  } catch (err) {
+    showToast(errorMessage(err), "error");
+  } finally {
+    worldBackupsLoading.delete(saveId);
+    renderWorldsView();
+  }
+}
+
+function toggleWorldBackupsPanel(saveId: string): void {
+  playMcSound("tab");
+  if (expandedWorldBackups.has(saveId)) {
+    expandedWorldBackups.delete(saveId);
+    renderWorldsView();
+    return;
+  }
+  expandedWorldBackups.add(saveId);
+  renderWorldsView();
+  const panel = document.querySelector<HTMLElement>(`.world-backup-panel[data-backup-save="${CSS.escape(saveId)}"]`);
+  if (panel) animatePanelReveal(panel, getEffectiveMotion(), "down");
+  void loadWorldBackups(saveId);
+}
+
+async function handleCreateWorldBackup(saveId: string): Promise<void> {
+  if (!state || state.running_session !== null || worldBackupBusy.has(saveId)) return;
+  unlockAudioContext();
+  playMcSound("click");
+  worldBackupBusy.add(saveId);
+  expandedWorldBackups.add(saveId);
+  renderWorldsView();
+  try {
+    const created = await ipc.createWorldBackup(saveId);
+    const existing = worldBackupsCache.get(saveId) ?? [];
+    const next = [created, ...existing.filter((b) => b.filename !== created.filename)];
+    worldBackupsCache.set(saveId, next);
+    const save = state.saves.find((s) => s.id === saveId);
+    if (save) save.backup_count = next.length;
+    playMcSound("launch");
+    showToast(
+      tr(getEffectiveLanguage(), "worlds.backupCreatedToast", {
+        id: saveId,
+        size: formatBytes(created.size_bytes),
+      }),
+      "success"
+    );
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  } finally {
+    worldBackupBusy.delete(saveId);
+    renderWorldsView();
+  }
+}
+
+function openRestoreBackupDialog(backup: WorldBackupSummary, trigger: HTMLElement): void {
+  pendingRestoreBackup = backup;
+  lastRestoreDialogTrigger = trigger;
+  byId<HTMLParagraphElement>("restore-dialog-desc").textContent = tr(
+    getEffectiveLanguage(),
+    "worlds.restoreDesc",
+    {
+      id: backup.save_id,
+      file: backup.filename,
+      date: formatEpoch(backup.created_epoch_secs),
+    }
+  );
+  const dialog = byId<HTMLDialogElement>("restore-backup-dialog");
+  if (!dialog.open) dialog.showModal();
+  animateDialogOpen(dialog, getEffectiveMotion());
+  byId<HTMLButtonElement>("restore-dialog-cancel").focus({ preventScroll: true });
+}
+
+async function confirmRestoreBackup(): Promise<void> {
+  if (!state || !pendingRestoreBackup) return;
+  const backup = pendingRestoreBackup;
+  const confirmBtn = byId<HTMLButtonElement>("restore-dialog-confirm");
+  confirmBtn.disabled = true;
+  worldBackupBusy.add(backup.save_id);
+  try {
+    const restored = await ipc.restoreWorldBackup(backup.filename);
+    const idx = state.saves.findIndex((s) => s.id === restored.id);
+    if (idx >= 0) {
+      state.saves[idx] = restored;
+    } else {
+      state.saves.unshift(restored);
+    }
+    byId<HTMLDialogElement>("restore-backup-dialog").close();
+    playMcSound("launch");
+    renderPlayView();
+    renderWorldsView();
+    showToast(tr(getEffectiveLanguage(), "worlds.backupRestoredToast", { id: restored.id }), "success");
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  } finally {
+    confirmBtn.disabled = false;
+    worldBackupBusy.delete(backup.save_id);
+    pendingRestoreBackup = null;
+    renderWorldsView();
+  }
+}
+
+async function handleDeleteWorldBackup(backup: WorldBackupSummary): Promise<void> {
+  if (!state || state.running_session !== null) return;
+  worldBackupBusy.add(backup.filename);
+  renderWorldsView();
+  try {
+    await ipc.deleteWorldBackup(backup.filename);
+    const prev = worldBackupsCache.get(backup.save_id) ?? [];
+    const next = prev.filter((b) => b.filename !== backup.filename);
+    worldBackupsCache.set(backup.save_id, next);
+    const save = state.saves.find((s) => s.id === backup.save_id);
+    if (save) save.backup_count = next.length;
+    playMcSound("click");
+    showToast(tr(getEffectiveLanguage(), "worlds.backupDeletedToast"), "success");
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  } finally {
+    worldBackupBusy.delete(backup.filename);
+    renderWorldsView();
+  }
+}
+
 function renderWorldsView(): void {
   if (!state) return;
   const lang = getEffectiveLanguage();
   const { saves, config, vanilla } = state;
+  const runningLocked = state.running_session !== null;
+
+  const totalPlaytimePill = document.getElementById("worlds-playtime-pill");
+  if (totalPlaytimePill) {
+    const totalSecs = state.playtime_stats?.total_playtime_secs ?? 0;
+    if (totalSecs > 0) {
+      totalPlaytimePill.textContent = tr(lang, "playtime.totalBadge", {
+        time: formatPlaytime(totalSecs, lang),
+      });
+      totalPlaytimePill.hidden = false;
+    } else {
+      totalPlaytimePill.hidden = true;
+    }
+  }
+  syncScreenshotsCountBadges();
 
   const filterInput = document.getElementById("worlds-filter-input") as HTMLInputElement | null;
   const sortSelect = document.getElementById("worlds-sort-select") as HTMLSelectElement | null;
@@ -1627,15 +2515,34 @@ function renderWorldsView(): void {
 
   for (const save of filteredSaves) {
     const isActive = config.last_save_id === save.id;
+    const backupCount = worldBackupsCache.get(save.id)?.length ?? save.backup_count ?? 0;
+    const isBackupsOpen = expandedWorldBackups.has(save.id);
+    const worldStats = state.playtime_stats?.per_world?.[save.id];
+
     const row = document.createElement("div");
     row.className = isActive ? "world-row is-active" : "world-row";
     row.setAttribute("role", "listitem");
     row.style.setProperty("--tile-hue", String(seedHue(save.id)));
 
-    const iconWrap = document.createElement("div");
-    iconWrap.className = "world-row-icon";
-    iconWrap.setAttribute("aria-hidden", "true");
-    iconWrap.innerHTML = `<svg class="ico small"><use href="#ico-cube" /></svg>`;
+    const thumb = document.createElement("div");
+    thumb.className = save.icon_data_url
+      ? "world-card-thumb"
+      : "world-card-thumb world-card-thumb--fallback";
+    thumb.setAttribute("aria-hidden", "true");
+    if (save.icon_data_url) {
+      const img = document.createElement("img");
+      img.src = save.icon_data_url;
+      img.alt = "";
+      thumb.appendChild(img);
+    } else {
+      thumb.innerHTML = `<svg class="ico"><use href="#ico-cube" /></svg>`;
+    }
+    if (backupCount > 0) {
+      const badge = document.createElement("span");
+      badge.className = "world-card-thumb-badge";
+      badge.textContent = String(backupCount);
+      thumb.appendChild(badge);
+    }
 
     const main = document.createElement("div");
     main.className = "row-main";
@@ -1651,6 +2558,15 @@ function renderWorldsView(): void {
       tag.className = "row-tag";
       tag.textContent = tr(lang, "worlds.selectedTag");
       title.appendChild(tag);
+    }
+
+    if (worldStats && worldStats.playtime_secs > 0) {
+      const ptTag = document.createElement("span");
+      ptTag.className = "row-tag tabular";
+      ptTag.textContent = tr(lang, "playtime.worldBadge", {
+        time: formatPlaytime(worldStats.playtime_secs, lang),
+      });
+      title.appendChild(ptTag);
     }
 
     const sub = document.createElement("div");
@@ -1678,12 +2594,24 @@ function renderWorldsView(): void {
       void handleSelectSave(save.id);
     });
 
+    const backupsBtn = document.createElement("button");
+    backupsBtn.type = "button";
+    backupsBtn.className = "btn-secondary btn-sm";
+    backupsBtn.setAttribute("aria-expanded", isBackupsOpen ? "true" : "false");
+    backupsBtn.textContent =
+      backupCount > 0
+        ? tr(lang, "worlds.btnBackupsCount", { count: backupCount })
+        : tr(lang, "worlds.btnBackups");
+    backupsBtn.addEventListener("click", () => {
+      toggleWorldBackupsPanel(save.id);
+    });
+
     const playBtn = document.createElement("button");
     playBtn.type = "button";
     playBtn.className = "btn-primary btn-sm";
     playBtn.textContent = tr(lang, "worlds.btnLaunch");
     playBtn.setAttribute("aria-label", tr(lang, "worlds.ariaLaunchWorld", { id: save.id }));
-    playBtn.disabled = state?.running_session !== null;
+    playBtn.disabled = runningLocked || !vanilla.java_ready;
     playBtn.addEventListener("click", () => {
       void handleLaunchClient("singleplayer", save.id, null);
     });
@@ -1693,13 +2621,108 @@ function renderWorldsView(): void {
     deleteBtn.className = "btn-danger btn-sm";
     deleteBtn.textContent = tr(lang, "worlds.btnDelete");
     deleteBtn.setAttribute("aria-label", tr(lang, "worlds.ariaDeleteWorld", { id: save.id }));
-    deleteBtn.disabled = state?.running_session !== null;
+    deleteBtn.disabled = runningLocked;
     deleteBtn.addEventListener("click", () => {
       openDeleteDialog(save, deleteBtn);
     });
 
-    actions.append(selectBtn, playBtn, deleteBtn);
-    row.append(iconWrap, main, actions);
+    actions.append(selectBtn, backupsBtn, playBtn, deleteBtn);
+    row.append(thumb, main, actions);
+
+    if (isBackupsOpen) {
+      const panel = document.createElement("div");
+      panel.className = "world-backup-panel";
+      panel.dataset.backupSave = save.id;
+
+      const head = document.createElement("div");
+      head.className = "world-backup-head";
+
+      const bTitle = document.createElement("span");
+      bTitle.className = "world-backup-title";
+      bTitle.innerHTML = `<svg class="ico small" aria-hidden="true"><use href="#ico-archive" /></svg>`;
+      const bTitleText = document.createElement("span");
+      bTitleText.textContent = tr(lang, "worlds.backupPanelTitle", { id: save.id });
+      bTitle.appendChild(bTitleText);
+
+      const createBtn = document.createElement("button");
+      createBtn.type = "button";
+      createBtn.className = "btn-primary btn-sm";
+      const isCreating = worldBackupBusy.has(save.id);
+      createBtn.disabled = runningLocked || isCreating;
+      createBtn.textContent = tr(
+        lang,
+        isCreating ? "worlds.backupCreatingBtn" : "worlds.backupCreateBtn"
+      );
+      createBtn.addEventListener("click", () => {
+        void handleCreateWorldBackup(save.id);
+      });
+
+      head.append(bTitle, createBtn);
+      panel.appendChild(head);
+
+      const backups = worldBackupsCache.get(save.id);
+      if (worldBackupsLoading.has(save.id) && !backups) {
+        const skel = document.createElement("div");
+        skel.className = "skeleton skeleton-line";
+        panel.appendChild(skel);
+      } else if (!backups || backups.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "world-backup-empty";
+        empty.textContent = tr(lang, "worlds.backupEmpty");
+        panel.appendChild(empty);
+      } else {
+        const bList = document.createElement("div");
+        bList.className = "world-backup-list";
+        for (const b of backups) {
+          const bRow = document.createElement("div");
+          bRow.className = "backup-row" + (worldBackupBusy.has(b.filename) ? " is-busy" : "");
+
+          const bMeta = document.createElement("div");
+          bMeta.className = "backup-row-meta";
+          const bName = document.createElement("span");
+          bName.className = "backup-row-name";
+          bName.title = b.filename;
+          bName.textContent = b.filename;
+          const bSub = document.createElement("span");
+          bSub.className = "backup-row-sub";
+          bSub.textContent = tr(lang, "worlds.backupRowSub", {
+            date: formatEpoch(b.created_epoch_secs),
+            size: formatBytes(b.size_bytes),
+            files: formatLocaleNumber(b.file_count, lang, 0),
+          });
+          bMeta.append(bName, bSub);
+
+          const bActs = document.createElement("div");
+          bActs.className = "backup-row-actions";
+
+          const restoreBtn = document.createElement("button");
+          restoreBtn.type = "button";
+          restoreBtn.className = "btn-secondary btn-sm";
+          restoreBtn.disabled = runningLocked || worldBackupBusy.has(save.id);
+          restoreBtn.textContent = tr(lang, "worlds.backupRestoreBtn");
+          restoreBtn.addEventListener("click", () => {
+            openRestoreBackupDialog(b, restoreBtn);
+          });
+
+          const delBackupBtn = document.createElement("button");
+          delBackupBtn.type = "button";
+          delBackupBtn.className = "btn-danger btn-sm";
+          delBackupBtn.disabled = runningLocked || worldBackupBusy.has(b.filename);
+          delBackupBtn.textContent = tr(lang, "worlds.backupDeleteBtn");
+          delBackupBtn.addEventListener("click", () => {
+            void handleDeleteWorldBackup(b);
+          });
+
+          bActs.append(restoreBtn, delBackupBtn);
+          bRow.append(bMeta, bActs);
+          bList.appendChild(bRow);
+        }
+        panel.appendChild(bList);
+      }
+
+      row.appendChild(panel);
+    }
+
     list.appendChild(row);
   }
 }
@@ -1748,7 +2771,12 @@ function renderProfileView(): void {
   byId<HTMLInputElement>("pref-proc-boost").checked = config.process_boost;
   byId<HTMLSelectElement>("pref-dl-threads").value = String(config.download_threads || 24);
 
-  byId<HTMLElement>("profile-uuid-preview").textContent = computeOfflineUuidPreview(config.username);
+  const typedUsername = usernameInput.value.trim();
+  const displayUuid =
+    state.player_uuid && (!typedUsername || typedUsername === config.username)
+      ? state.player_uuid
+      : computeOfflineUuidPreview(typedUsername || config.username);
+  byId<HTMLElement>("profile-uuid-preview").textContent = displayUuid;
   byId<HTMLElement>("profile-arm-summary").textContent = tr(
     lang,
     skin_is_slim ? "skin.badgeSlim" : "skin.badgeClassic"
@@ -1786,6 +2814,10 @@ function renderProfileView(): void {
           b.classList.toggle("active", b.dataset.skinView === next);
         }
         syncSlidingIndicators();
+      },
+      onResetPose: () => {
+        playMcSound("click");
+        showToast(tr(getEffectiveLanguage(), "skin.poseResetToast"), "neutral");
       },
     });
   }
@@ -1865,6 +2897,12 @@ function renderServersList(): void {
   const list = byId<HTMLDivElement>("servers-list");
   list.innerHTML = "";
   const servers = state.config.saved_servers;
+  const launchBlocked = state.running_session !== null || !state.vanilla.java_ready;
+
+  const pingAllBtn = document.getElementById("btn-ping-all-servers");
+  if (pingAllBtn instanceof HTMLButtonElement) {
+    pingAllBtn.disabled = servers.length === 0 || serverPingInFlight.size > 0;
+  }
 
   if (servers.length === 0) {
     const empty = document.createElement("p");
@@ -1885,31 +2923,32 @@ function renderServersList(): void {
 
     const title = document.createElement("div");
     title.className = "row-title";
+
+    if (check.status === "online" && check.ping?.favicon?.startsWith("data:image/png;base64,")) {
+      const fav = document.createElement("img");
+      fav.src = check.ping.favicon;
+      fav.alt = "";
+      fav.width = 24;
+      fav.height = 24;
+      fav.style.width = "1.5rem";
+      fav.style.height = "1.5rem";
+      fav.style.borderRadius = "0.3rem";
+      fav.style.objectFit = "cover";
+      fav.style.flexShrink = "0";
+      title.appendChild(fav);
+    }
+
     const nameEl = document.createElement("span");
     nameEl.textContent = srv.name;
     title.appendChild(nameEl);
 
-    if (check.status === "online" && check.ping) {
-      const tag = document.createElement("span");
-      tag.className = "row-tag tabular";
-      tag.textContent = `${check.ping.latency_ms} ms · ${check.ping.online_players}/${check.ping.max_players}`;
-      title.appendChild(tag);
-    } else if (check.status === "error") {
-      const tag = document.createElement("span");
-      tag.className = "row-tag";
-      tag.textContent = tr(lang, "servers.noResponse");
-      title.appendChild(tag);
+    if (check.status !== "idle") {
+      title.appendChild(createServerPingPill(check, lang));
     }
 
     const sub = document.createElement("div");
     sub.className = "row-sub tabular";
-    if (check.status === "online" && check.ping) {
-      sub.textContent = tr(lang, "servers.subOnline", {
-        addr: srv.address,
-        ver: check.ping.version_name,
-        desc: check.ping.description,
-      });
-    } else if (check.status === "error" && check.message) {
+    if (check.status === "error" && check.message) {
       sub.textContent = `${srv.address} · ${check.message}`;
     } else if (check.status === "checking") {
       sub.textContent = tr(lang, "servers.subChecking", { addr: srv.address });
@@ -1918,6 +2957,20 @@ function renderServersList(): void {
     }
 
     main.append(title, sub);
+
+    if (check.status === "online" && check.ping) {
+      const motd = document.createElement("div");
+      motd.className = "server-motd";
+      if (check.ping.version_name) {
+        const verTag = document.createElement("span");
+        verTag.className = "server-motd-version";
+        verTag.textContent = check.ping.version_name;
+        motd.appendChild(verTag);
+      }
+      const descNode = document.createTextNode(check.ping.description || srv.address);
+      motd.appendChild(descNode);
+      main.appendChild(motd);
+    }
 
     const actions = document.createElement("div");
     actions.className = "row-actions";
@@ -1958,7 +3011,7 @@ function renderServersList(): void {
       "aria-label",
       tr(lang, "servers.ariaConnect", { name: srv.name, addr: srv.address })
     );
-    connectBtn.disabled = state?.running_session !== null;
+    connectBtn.disabled = launchBlocked;
     connectBtn.addEventListener("click", () => {
       void handleLaunchClient("multiplayer", null, srv.address);
     });
@@ -2073,6 +3126,39 @@ function syncLibraryControls(): void {
   for (const id of ["btn-kit-fabric-shaders", "btn-kit-forge-shaders", "btn-import-jar", "btn-import-zip"]) {
     const btn = document.getElementById(id);
     if (btn instanceof HTMLButtonElement) btn.disabled = runningLocked || libImportBusy;
+  }
+
+  const importZipLabel = document.getElementById("lib-import-zip-label");
+  if (importZipLabel) {
+    importZipLabel.textContent = tr(
+      lang,
+      libActiveTab === "resourcePack" ? "library.importPackZipBtn" : "library.importShaderZipBtn"
+    );
+  }
+
+  const checkUpdBtn = document.getElementById("btn-lib-check-updates");
+  const checkUpdLabel = document.getElementById("lib-check-updates-label");
+  if (checkUpdBtn instanceof HTMLButtonElement && checkUpdLabel) {
+    checkUpdBtn.disabled = runningLocked || libUpdatesChecking || libUpdatingAll;
+    checkUpdLabel.textContent = tr(
+      lang,
+      libUpdatesChecking ? "library.checkingUpdatesBtn" : "library.checkUpdatesBtn"
+    );
+  }
+  const updateAllBtn = document.getElementById("btn-lib-update-all");
+  if (updateAllBtn instanceof HTMLButtonElement) {
+    const scopePrefix = `${libInstalledKind}:${getEffectiveCatalogLoader()}:`;
+    let pendingCount = 0;
+    for (const key of installedUpdates.keys()) {
+      if (key.startsWith(scopePrefix)) pendingCount += 1;
+    }
+    updateAllBtn.hidden = pendingCount === 0;
+    updateAllBtn.disabled = runningLocked || libUpdatingAll || libUpdatesChecking;
+    if (pendingCount > 0) {
+      updateAllBtn.textContent = libUpdatingAll
+        ? tr(lang, "library.updatingBtn")
+        : tr(lang, "library.updateAllBtn", { count: pendingCount });
+    }
   }
 
   const prepareBtn = document.getElementById("btn-lib-prepare-loader");
@@ -2221,10 +3307,141 @@ function renderLibraryCatalog(): void {
   }
 }
 
+function modUpdateKey(kind: LibraryKind, loader: LoaderKind, fileName: string): string {
+  return `${kind}:${loader}:${fileName}`;
+}
+
+async function handleCheckLibraryUpdates(): Promise<void> {
+  if (!state || state.running_session !== null || libUpdatesChecking) return;
+  unlockAudioContext();
+  playMcSound("click");
+  const kind = libInstalledKind;
+  const loader = getEffectiveCatalogLoader();
+  const scopePrefix = `${kind}:${loader}:`;
+  libUpdatesChecking = true;
+  syncLibraryControls();
+  try {
+    const updates = await ipc.checkLibraryUpdates(kind, loader);
+    for (const k of Array.from(installedUpdates.keys())) {
+      if (k.startsWith(scopePrefix)) installedUpdates.delete(k);
+    }
+    for (const upd of updates) {
+      installedUpdates.set(modUpdateKey(kind, loader, upd.filename), upd);
+    }
+    libUpdatesCheckedScope = `${kind}:${loader}:${state.config.mc_version}`;
+    const lang = getEffectiveLanguage();
+    if (updates.length > 0) {
+      playMcSound("launch");
+      showToast(tr(lang, "library.updatesFoundToast", { count: updates.length }), "success");
+    } else {
+      showToast(tr(lang, "library.updatesUpToDateToast"), "neutral");
+    }
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  } finally {
+    libUpdatesChecking = false;
+    syncLibraryControls();
+    renderLibraryInstalled();
+  }
+}
+
+async function handleUpdateSingleMod(item: InstalledLibraryItem, upd: ModUpdateInfo): Promise<void> {
+  if (!state || state.running_session !== null || updatingModFiles.has(item.fileName)) return;
+  unlockAudioContext();
+  playMcSound("click");
+  const loader = getEffectiveCatalogLoader();
+  const key = modUpdateKey(item.kind, loader, item.fileName);
+  updatingModFiles.add(item.fileName);
+  renderLibraryInstalled();
+  try {
+    const res = await ipc.installModrinthItem({
+      projectId: upd.project_id,
+      kind: item.kind,
+      loader,
+    });
+    if (res.loaderStatus.mcVersion === state.config.mc_version) {
+      state.loader_status = res.loaderStatus;
+    }
+    state.library_counts = res.libraryCounts;
+    installedUpdates.delete(key);
+    playMcSound("launch");
+    showToast(
+      tr(getEffectiveLanguage(), "library.updatedOneToast", {
+        title: upd.title || item.displayName,
+        ver: upd.latest_version,
+      }),
+      "success"
+    );
+    await loadLibraryInstalled();
+    renderPlayView();
+    syncLibraryControls();
+  } catch (err) {
+    playMcSound("error");
+    showToast(errorMessage(err), "error");
+  } finally {
+    updatingModFiles.delete(item.fileName);
+    syncLibraryControls();
+    renderLibraryInstalled();
+  }
+}
+
+async function handleUpdateAllMods(): Promise<void> {
+  if (!state || state.running_session !== null || libUpdatingAll) return;
+  const kind = libInstalledKind;
+  const loader = getEffectiveCatalogLoader();
+  const scopePrefix = `${kind}:${loader}:`;
+  const entries = Array.from(installedUpdates.entries()).filter(([k]) => k.startsWith(scopePrefix));
+  if (entries.length === 0) return;
+
+  unlockAudioContext();
+  playMcSound("click");
+  libUpdatingAll = true;
+  syncLibraryControls();
+  let updatedCount = 0;
+  try {
+    for (const [key, upd] of entries) {
+      updatingModFiles.add(upd.filename);
+      renderLibraryInstalled();
+      try {
+        const res = await ipc.installModrinthItem({
+          projectId: upd.project_id,
+          kind,
+          loader,
+        });
+        if (res.loaderStatus.mcVersion === state.config.mc_version) {
+          state.loader_status = res.loaderStatus;
+        }
+        state.library_counts = res.libraryCounts;
+        installedUpdates.delete(key);
+        updatedCount += 1;
+      } catch (err) {
+        showToast(errorMessage(err), "error");
+      } finally {
+        updatingModFiles.delete(upd.filename);
+      }
+    }
+    if (updatedCount > 0) {
+      playMcSound("launch");
+      showToast(tr(getEffectiveLanguage(), "library.updatedAllToast", { count: updatedCount }), "success");
+    }
+    await loadLibraryInstalled();
+    renderPlayView();
+  } finally {
+    libUpdatingAll = false;
+    syncLibraryControls();
+    renderLibraryInstalled();
+  }
+}
+
 function renderLibraryInstalled(): void {
   const listEl = document.getElementById("library-installed-list");
   if (!listEl || !state) return;
   const lang = getEffectiveLanguage();
+  const loader = getEffectiveCatalogLoader();
+  const runningLocked = state.running_session !== null;
+  const currentScope = `${libInstalledKind}:${loader}:${state.config.mc_version}`;
+  const checkedThisScope = libUpdatesCheckedScope === currentScope;
   listEl.innerHTML = "";
 
   if (libInstalledItems.length === 0) {
@@ -2251,6 +3468,28 @@ function renderLibraryInstalled(): void {
     const actions = document.createElement("div");
     actions.className = "lib-installed-actions";
 
+    const upd = installedUpdates.get(modUpdateKey(item.kind, loader, item.fileName));
+    if (upd) {
+      const updBtn = document.createElement("button");
+      updBtn.type = "button";
+      updBtn.className = "mod-update-pill";
+      const isBusy = updatingModFiles.has(item.fileName);
+      if (isBusy) updBtn.dataset.state = "updating";
+      updBtn.disabled = runningLocked || isBusy || libUpdatingAll;
+      updBtn.textContent = isBusy
+        ? tr(lang, "library.updatingBtn")
+        : tr(lang, "library.updateBtn", { ver: upd.latest_version });
+      updBtn.addEventListener("click", () => {
+        void handleUpdateSingleMod(item, upd);
+      });
+      actions.appendChild(updBtn);
+    } else if (checkedThisScope && item.projectId) {
+      const latestPill = document.createElement("span");
+      latestPill.className = "mod-update-pill mod-update-pill--latest";
+      latestPill.textContent = tr(lang, "library.upToDateBadge");
+      actions.appendChild(latestPill);
+    }
+
     const statusLabel = document.createElement("span");
     statusLabel.className = "lib-state-label";
     statusLabel.textContent = tr(lang, item.enabled ? "library.enableAction" : "library.disableAction");
@@ -2259,6 +3498,7 @@ function renderLibraryInstalled(): void {
     toggle.type = "checkbox";
     toggle.className = "switch";
     toggle.checked = item.enabled;
+    toggle.disabled = runningLocked || libUpdatingAll;
     toggle.setAttribute("aria-label", item.fileName);
     toggle.addEventListener("change", () => {
       void handleToggleInstalledItem(item);
@@ -2267,6 +3507,7 @@ function renderLibraryInstalled(): void {
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "btn-danger btn-sm";
+    delBtn.disabled = runningLocked || libUpdatingAll;
     delBtn.textContent = tr(lang, "library.deleteAction");
     delBtn.addEventListener("click", () => {
       void handleDeleteInstalledItem(item);
@@ -2429,7 +3670,7 @@ async function handleInstallCatalogItem(hit: ModrinthSearchHit, kind: LibraryKin
 }
 
 async function handleInstallShaderBundle(presetId: "fabric_shaders" | "forge_shaders"): Promise<void> {
-  if (!state) return;
+  if (!state || state.running_session !== null) return;
   unlockAudioContext();
   playMcSound("click");
   const fabBtn = byId<HTMLButtonElement>("btn-kit-fabric-shaders");
@@ -2459,8 +3700,7 @@ async function handleInstallShaderBundle(presetId: "fabric_shaders" | "forge_sha
     playMcSound("error");
     showToast(errorMessage(err), "error");
   } finally {
-    fabBtn.disabled = false;
-    forgeBtn.disabled = false;
+    syncLibraryControls();
   }
 }
 
@@ -2489,7 +3729,7 @@ async function handleImportLibraryFile(kind: LibraryKind): Promise<void> {
 }
 
 async function handleToggleInstalledItem(item: InstalledLibraryItem): Promise<void> {
-  if (!state) return;
+  if (!state || state.running_session !== null) return;
   try {
     const counts = await ipc.toggleLibraryItem(
       item.kind,
@@ -2509,7 +3749,7 @@ async function handleToggleInstalledItem(item: InstalledLibraryItem): Promise<vo
 }
 
 async function handleDeleteInstalledItem(item: InstalledLibraryItem): Promise<void> {
-  if (!state) return;
+  if (!state || state.running_session !== null) return;
   try {
     const counts = await ipc.deleteLibraryItem(
       item.kind,
@@ -2556,8 +3796,10 @@ function renderAll(): void {
   applyPreferences();
   renderTopbarAndSession();
   renderPlayView();
+  renderCrashDoctor(false);
   renderLibraryView();
   renderWorldsView();
+  if (screenshotsLoaded) renderScreenshotsGallery();
   renderProfileView();
   renderSystemView();
 }
@@ -2651,8 +3893,14 @@ async function handleOptimizeClientNow(): Promise<void> {
   const lang = getEffectiveLanguage();
   btn.disabled = true;
   summaryEl.textContent = tr(lang, "turbo.optimizingBtn");
+  summaryEl.hidden = false;
   try {
     const report = await ipc.optimizeClientNow();
+    if (report.config) {
+      state.config = report.config;
+      renderProfileView();
+      renderPlayView();
+    }
     if (report.cdn_ping_ms !== null) {
       pingBadge.textContent = `${formatLocaleNumber(report.cdn_ping_ms, lang, 0)} ms CDN`;
     } else if (report.local_ping_ms !== null) {
@@ -2671,6 +3919,7 @@ async function handleOptimizeClientNow(): Promise<void> {
       flags: formatLocaleNumber(report.applied_flags_count, lang, 0),
     });
     summaryEl.textContent = summaryText;
+    summaryEl.hidden = false;
     showToast(summaryText, "success");
   } catch (err) {
     playMcSound("error");
@@ -2728,6 +3977,7 @@ async function commitUsernameFromPlay(): Promise<boolean> {
     ui_sounds: state.config.ui_sounds,
     ui_language: state.config.ui_language,
   });
+  state.player_uuid = computeOfflineUuidPreview(state.config.username);
   renderTopbarAndSession();
   renderProfileView();
   return true;
@@ -2945,6 +4195,7 @@ async function handleSaveProfileForm(e: SubmitEvent): Promise<void> {
       ui_sounds: state.config.ui_sounds,
       ui_language: state.config.ui_language,
     });
+    state.player_uuid = computeOfflineUuidPreview(state.config.username);
     renderTopbarAndSession();
     renderPlayView();
     renderProfileView();
@@ -3145,8 +4396,9 @@ async function handleAddServer(e: SubmitEvent): Promise<void> {
   const errEl = byId<HTMLParagraphElement>("server-form-error");
 
   const addr = addrInput.value.trim();
-  if (!addr) {
-    errEl.textContent = tr(getEffectiveLanguage(), "servers.addrEmpty");
+  const validation = validateServerAddress(addr);
+  if (validation) {
+    errEl.textContent = validation;
     errEl.hidden = false;
     addrInput.focus();
     return;
@@ -3156,7 +4408,9 @@ async function handleAddServer(e: SubmitEvent): Promise<void> {
   try {
     state.config.saved_servers = await ipc.addServer(nameInput.value.trim(), addr);
     renderServersList();
+    renderPlayView();
     showToast(tr(getEffectiveLanguage(), "servers.addedToast"), "success");
+    void handlePingServer(addr);
   } catch (err) {
     errEl.textContent = errorMessage(err);
     errEl.hidden = false;
@@ -3168,21 +4422,41 @@ async function handleRemoveServer(index: number): Promise<void> {
   try {
     state.config.saved_servers = await ipc.removeServer(index);
     renderServersList();
+    renderPlayView();
   } catch (err) {
     showToast(errorMessage(err), "error");
   }
 }
 
 async function handlePingServer(address: string): Promise<void> {
+  if (serverPingInFlight.has(address)) return;
+  serverPingInFlight.add(address);
   serverChecks.set(address, { status: "checking" });
   renderServersList();
+  renderPlayView();
   try {
     const ping = await ipc.pingServerCmd(address);
     serverChecks.set(address, { status: "online", ping });
   } catch (err) {
     serverChecks.set(address, { status: "error", message: errorMessage(err) });
+  } finally {
+    serverPingInFlight.delete(address);
   }
   renderServersList();
+  renderPlayView();
+}
+
+async function autoPingSavedServers(force = false): Promise<void> {
+  if (!state || state.config.saved_servers.length === 0) return;
+  const targets = state.config.saved_servers
+    .map((s) => s.address)
+    .filter((addr) => {
+      if (serverPingInFlight.has(addr)) return false;
+      if (force) return true;
+      const existing = serverChecks.get(addr);
+      return !existing || existing.status === "idle";
+    });
+  await Promise.allSettled(targets.map((addr) => handlePingServer(addr)));
 }
 
 async function handleProbeServer(address: string): Promise<void> {
@@ -3709,14 +4983,43 @@ function buildPaletteCommands(query: string): PaletteCommand[] {
     });
   }
 
-  cmds.push({
-    id: "act-optimize",
-    group: actionsGroup,
-    label: tr(lang, "cmdk.actionOptimize"),
-    icon: "ico-sliders",
-    disabled: optimizeBtnEl.disabled,
-    run: () => optimizeBtnEl.click(),
-  });
+  cmds.push(
+    {
+      id: "act-optimize",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionOptimize"),
+      icon: "ico-sliders",
+      disabled: optimizeBtnEl.disabled,
+      run: () => optimizeBtnEl.click(),
+    },
+    {
+      id: "act-screenshots",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionScreenshots"),
+      keywords: "screenshots gallery photos f2 ekran",
+      icon: "ico-camera",
+      run: () => {
+        setActiveView("worlds", true, true);
+        setWorldsSubTab("screenshots", false);
+      },
+    },
+    {
+      id: "act-crash-doctor",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionCrashDoctor"),
+      keywords: "crash doctor logs error diagnose",
+      icon: "ico-shield",
+      run: () => void handleRunCrashDoctor(),
+    },
+    {
+      id: "act-diagnostics",
+      group: actionsGroup,
+      label: tr(lang, "cmdk.actionDiagnostics"),
+      keywords: "copy diagnostics report clipboard system info",
+      icon: "ico-copy",
+      run: () => void handleCopyDiagnostics(),
+    }
+  );
 
   const worldsGroup = tr(lang, "cmdk.groupWorlds");
   cmds.push({
@@ -3899,6 +5202,121 @@ function wireEvents(): void {
   });
   document.getElementById("btn-play-open-library")?.addEventListener("click", () => {
     setActiveView("library", true, true);
+  });
+  document.getElementById("btn-play-crash-doctor")?.addEventListener("click", () => {
+    void handleRunCrashDoctor();
+  });
+  document.getElementById("btn-general-copy-diag")?.addEventListener("click", () => {
+    void handleCopyDiagnostics();
+  });
+  document.getElementById("btn-ping-all-servers")?.addEventListener("click", () => {
+    unlockAudioContext();
+    playMcSound("click");
+    void autoPingSavedServers(true);
+  });
+  document.getElementById("btn-lib-check-updates")?.addEventListener("click", () => {
+    void handleCheckLibraryUpdates();
+  });
+  document.getElementById("btn-lib-update-all")?.addEventListener("click", () => {
+    void handleUpdateAllMods();
+  });
+  for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-worlds-tab]"))) {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.worldsTab === "screenshots" ? "screenshots" : "saves";
+      setWorldsSubTab(tab, true);
+    });
+  }
+  document.getElementById("btn-refresh-screenshots")?.addEventListener("click", () => {
+    unlockAudioContext();
+    playMcSound("click");
+    void loadScreenshots(true);
+  });
+  document.getElementById("btn-open-screenshots-folder")?.addEventListener("click", () => {
+    unlockAudioContext();
+    playMcSound("click");
+    void ipc.openScreenshotsFolder().catch((err) => showToast(errorMessage(err), "error"));
+  });
+  document.getElementById("btn-lightbox-close")?.addEventListener("click", () => {
+    byId<HTMLDialogElement>("gallery-lightbox").close();
+  });
+  document.getElementById("btn-lightbox-prev")?.addEventListener("click", () => stepLightbox(-1));
+  document.getElementById("btn-lightbox-next")?.addEventListener("click", () => stepLightbox(1));
+  document.getElementById("btn-lightbox-folder")?.addEventListener("click", () => {
+    void ipc.openScreenshotsFolder().catch((err) => showToast(errorMessage(err), "error"));
+  });
+  document.getElementById("btn-lightbox-delete")?.addEventListener("click", () => {
+    if (lightboxIndex >= 0 && screenshotItems[lightboxIndex]) {
+      void handleDeleteScreenshot(screenshotItems[lightboxIndex].filename);
+    }
+  });
+  const lightboxDlg = document.getElementById("gallery-lightbox");
+  if (lightboxDlg instanceof HTMLDialogElement) {
+    lightboxDlg.addEventListener("click", (e) => {
+      if (e.target === lightboxDlg) lightboxDlg.close();
+    });
+    lightboxDlg.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        stepLightbox(-1);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        stepLightbox(1);
+      }
+    });
+    lightboxDlg.addEventListener("close", () => {
+      cancelElementAnimation(lightboxDlg);
+      lightboxIndex = -1;
+      const trig = lightboxTriggerEl;
+      lightboxTriggerEl = null;
+      if (trig && trig.isConnected) trig.focus();
+    });
+  }
+
+  const restoreDlg = document.getElementById("restore-backup-dialog");
+  if (restoreDlg instanceof HTMLDialogElement) {
+    const closeRestore = () => {
+      if (restoreDlg.open) restoreDlg.close();
+    };
+    document.getElementById("restore-dialog-close")?.addEventListener("click", closeRestore);
+    document.getElementById("restore-dialog-cancel")?.addEventListener("click", closeRestore);
+    document.getElementById("restore-dialog-confirm")?.addEventListener("click", () => {
+      void confirmRestoreBackup();
+    });
+    restoreDlg.addEventListener("click", (e) => {
+      if (e.target === restoreDlg) closeRestore();
+    });
+    restoreDlg.addEventListener("close", () => {
+      cancelElementAnimation(restoreDlg);
+      const trig = lastRestoreDialogTrigger;
+      lastRestoreDialogTrigger = null;
+      if (trig && trig.isConnected) trig.focus();
+    });
+  }
+
+  document.getElementById("srv-addr")?.addEventListener("input", () => {
+    const errEl = document.getElementById("server-form-error");
+    const addrInput = document.getElementById("srv-addr");
+    if (errEl && !errEl.hidden && addrInput instanceof HTMLInputElement) {
+      const validation = validateServerAddress(addrInput.value);
+      if (!validation) {
+        errEl.hidden = true;
+        errEl.textContent = "";
+      } else {
+        errEl.textContent = validation;
+      }
+    }
+  });
+
+  document.getElementById("profile-username")?.addEventListener("input", () => {
+    const inputEl = document.getElementById("profile-username");
+    const uuidEl = document.getElementById("profile-uuid-preview");
+    if (inputEl instanceof HTMLInputElement && uuidEl) {
+      const typed = inputEl.value.trim();
+      uuidEl.textContent =
+        state?.player_uuid && (!typed || typed === state.config.username)
+          ? state.player_uuid
+          : computeOfflineUuidPreview(typed || state?.config.username || "Player");
+    }
   });
 
   for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>(".loader-pill[data-loader]"))) {
@@ -4347,6 +5765,9 @@ function wireEvents(): void {
       }
     }
     syncSlidingIndicators();
+    if (tabId === "network") {
+      void autoPingSavedServers(false);
+    }
   };
   for (const btn of settingsTabs) {
     btn.addEventListener("click", () => {
@@ -4428,6 +5849,13 @@ async function init(): Promise<void> {
   try {
     state = await ipc.getBootstrapState();
     renderAll();
+    if (!initialServersAutoPinged && state.config.saved_servers.length > 0) {
+      initialServersAutoPinged = true;
+      void autoPingSavedServers(false);
+    }
+    if (currentActiveViewId() === "worlds") {
+      void loadScreenshots(false);
+    }
     if (currentActiveViewId() === "library") {
       if (libActiveTab === "installed") {
         void loadLibraryInstalled();
@@ -4459,6 +5887,7 @@ async function init(): Promise<void> {
     state.vanilla = payload.vanilla;
     if (payload.loader_status) state.loader_status = payload.loader_status;
     if (payload.library_counts) state.library_counts = payload.library_counts;
+    if (payload.playtime_stats) state.playtime_stats = payload.playtime_stats;
     renderTopbarAndSession();
     renderPlayView();
     renderLibraryView();
@@ -4468,13 +5897,31 @@ async function init(): Promise<void> {
       void ipc.getBootstrapState().then((fresh) => {
         if (!state) return;
         state.config = fresh.config;
+        if (fresh.playtime_stats) state.playtime_stats = fresh.playtime_stats;
+        if (fresh.player_uuid) state.player_uuid = fresh.player_uuid;
         renderPlayView();
+        renderWorldsView();
+        renderProfileView();
         renderSystemView();
       }).catch(() => undefined);
     }
 
     const lang = getEffectiveLanguage();
     const feedback = byId<HTMLDivElement>("launch-feedback");
+    if (payload.diagnosis) {
+      lastCrashDiagnosis = payload.diagnosis;
+      renderCrashDoctor(true);
+    } else if (payload.kind === "launch" && (payload.error || (payload.exit_code !== null && payload.exit_code !== 0))) {
+      void ipc.diagnoseLastCrash().then((diag) => {
+        if (diag) {
+          lastCrashDiagnosis = diag;
+          renderCrashDoctor(true);
+        }
+      }).catch(() => undefined);
+    } else if (payload.kind === "launch" && payload.exit_code === 0 && !payload.error) {
+      lastCrashDiagnosis = null;
+      renderCrashDoctor(false);
+    }
     if (payload.error) {
       playMcSound("error");
       setBanner(feedback, tr(lang, "err.sessionFailed", { err: payload.error }), "error");

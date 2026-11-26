@@ -14,6 +14,7 @@ const EASE_ENTER = "cubic-bezier(0.16, 1, 0.3, 1)";
 const EASE_CONTROL = "cubic-bezier(0.2, 0.8, 0.2, 1)";
 
 const activeAnimations = new WeakMap<HTMLElement, Animation>();
+const wiredSlidingGroups = new WeakMap<HTMLElement, () => void>();
 
 export function systemPrefersReduced(): boolean {
   return (
@@ -97,7 +98,7 @@ export function cancelElementAnimation(el: HTMLElement): void {
 }
 
 /**
- * Spatial view handoff (Play / Saves / Profile / Settings).
+ * Spatial view handoff (Play / Library / Saves / Profile / Settings).
  * Visibility and ARIA state update synchronously on frame 0;
  * WAAPI provides a subtle, interruptible 185ms entrance when motion is enabled.
  */
@@ -147,6 +148,94 @@ export function animateDialogOpen(
     },
     preference
   );
+}
+
+/**
+ * Grounded entrance for inline banners & expandable panels (Crash Doctor card,
+ * World Backup drawer, inline detail panels). Strictly compositor-only.
+ */
+export function animatePanelReveal(
+  panelEl: HTMLElement,
+  preference: EffectiveMotion,
+  direction: "down" | "up" | "scale" = "down"
+): Promise<MotionResult> {
+  if (preference === "none") {
+    cancelElementAnimation(panelEl);
+    return Promise.resolve("skipped");
+  }
+  const fromTransform =
+    direction === "up"
+      ? "translateY(6px)"
+      : direction === "scale"
+        ? "scale(0.988)"
+        : "translateY(-5px)";
+  return animateElement(
+    panelEl,
+    [
+      { opacity: 0, transform: fromTransform },
+      { opacity: 1, transform: "none" },
+    ],
+    {
+      duration: 185,
+      easing: EASE_ENTER,
+    },
+    preference
+  );
+}
+
+/**
+ * Grounded entrance for the Screenshots Gallery lightbox modal.
+ */
+export function animateLightboxOpen(
+  lightboxEl: HTMLElement,
+  preference: EffectiveMotion
+): Promise<MotionResult> {
+  if (preference === "none") {
+    cancelElementAnimation(lightboxEl);
+    return Promise.resolve("skipped");
+  }
+  return animateElement(
+    lightboxEl,
+    [
+      { opacity: 0, transform: "scale(0.976)" },
+      { opacity: 1, transform: "scale(1)" },
+    ],
+    {
+      duration: 195,
+      easing: EASE_ENTER,
+    },
+    preference
+  );
+}
+
+/**
+ * Bounded, restrained stagger reveal for freshly populated lists/grids (e.g. Gallery, Backups).
+ * Strictly skipped when preference !== "full" and capped at `maxItems` so long lists stay instant.
+ */
+export function animateStaggerChildren(
+  container: HTMLElement,
+  selector: string,
+  preference: EffectiveMotion,
+  maxItems = 8
+): void {
+  if (preference !== "full" || document.hidden || !container.isConnected) return;
+  const items = Array.from(container.querySelectorAll<HTMLElement>(selector)).slice(0, maxItems);
+  items.forEach((item, idx) => {
+    void animateElement(
+      item,
+      [
+        { opacity: 0, transform: "translateY(5px)" },
+        { opacity: 1, transform: "translateY(0)" },
+      ],
+      {
+        duration: 175,
+        delay: idx * 18,
+        easing: EASE_ENTER,
+        fill: "backwards",
+      },
+      preference
+    );
+  });
 }
 
 /**
@@ -288,6 +377,12 @@ export function wireSlidingGroup(
   container: HTMLElement,
   activeSelector = ".active, [aria-selected='true'], [aria-pressed='true']"
 ): () => void {
+  const existing = wiredSlidingGroups.get(container);
+  if (existing) {
+    existing();
+    return existing;
+  }
+
   container.classList.add("has-glider");
   let glider = container.querySelector<HTMLSpanElement>(":scope > .seg-glider");
   if (!glider) {
@@ -339,6 +434,7 @@ export function wireSlidingGroup(
     }
   };
 
+  wiredSlidingGroups.set(container, sync);
   slidingGroupSyncers.push(sync);
   if (typeof ResizeObserver !== "undefined") {
     const ro = new ResizeObserver(() => sync());

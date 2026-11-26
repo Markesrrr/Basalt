@@ -94,10 +94,15 @@ pub fn read_minecraft_options_into(run_dir: &Path, gfx: &mut GraphicsSettings) -
                 }
             }
             "ao" => {
-                if let Ok(parsed) = v.parse::<bool>()
-                    && gfx.smooth_lighting != parsed
+                let parsed = match v {
+                    "true" | "1" | "2" => Some(true),
+                    "false" | "0" => Some(false),
+                    _ => None,
+                };
+                if let Some(val) = parsed
+                    && gfx.smooth_lighting != val
                 {
-                    gfx.smooth_lighting = parsed;
+                    gfx.smooth_lighting = val;
                     changed = true;
                 }
             }
@@ -260,7 +265,16 @@ pub fn sync_minecraft_options_with_pack(
             }
             if let Some(idx) = managed.iter().position(|(k, _)| *k == key) {
                 if !applied[idx] {
-                    lines.push(format!("{}:{}", managed[idx].0, managed[idx].1));
+                    // Preserve Fabulous graphicsMode:2 when fancy_graphics is enabled.
+                    let out_val = if key == "graphicsMode"
+                        && gfx.fancy_graphics
+                        && val.trim() == "2"
+                    {
+                        "2"
+                    } else {
+                        managed[idx].1.as_str()
+                    };
+                    lines.push(format!("{}:{out_val}", managed[idx].0));
                     applied[idx] = true;
                 }
                 continue;
@@ -315,6 +329,41 @@ mod tests {
         sync_minecraft_options(&dir, &gfx).unwrap();
         let written_fast = fs::read_to_string(dir.join("options.txt")).unwrap();
         assert!(written_fast.contains("graphicsMode:0\n"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_legacy_numeric_ao_and_preserves_fabulous_graphics_mode() {
+        let dir = std::env::temp_dir().join(format!(
+            "basalt_options_legacy_ao_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("options.txt"), "ao:0\ngraphicsMode:2\n").unwrap();
+        let mut gfx = GraphicsSettings {
+            smooth_lighting: true,
+            fancy_graphics: true,
+            ..Default::default()
+        };
+        assert!(super::read_minecraft_options_into(&dir, &mut gfx));
+        assert!(!gfx.smooth_lighting);
+        assert!(gfx.fancy_graphics);
+
+        fs::write(dir.join("options.txt"), "ao:2\ngraphicsMode:2\n").unwrap();
+        assert!(super::read_minecraft_options_into(&dir, &mut gfx));
+        assert!(gfx.smooth_lighting);
+
+        // Syncing with fancy_graphics=true must preserve Fabulous (2), while false switches to Fast (0).
+        sync_minecraft_options(&dir, &gfx).unwrap();
+        let kept_fabulous = fs::read_to_string(dir.join("options.txt")).unwrap();
+        assert!(kept_fabulous.contains("graphicsMode:2\n"));
+
+        gfx.fancy_graphics = false;
+        sync_minecraft_options(&dir, &gfx).unwrap();
+        let switched_fast = fs::read_to_string(dir.join("options.txt")).unwrap();
+        assert!(switched_fast.contains("graphicsMode:0\n"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

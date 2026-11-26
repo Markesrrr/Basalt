@@ -149,6 +149,24 @@
       <line x1="8" y1="7.5" x2="8.01" y2="7.5" />
       <line x1="8" y1="16.5" x2="8.01" y2="16.5" />
     </symbol>
+    <symbol id="ico-camera" viewBox="0 0 24 24">
+      <path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.2l1.4-2h5.8l1.4 2h2.2A1.5 1.5 0 0 1 20 8.5v9A1.5 1.5 0 0 1 18.5 19h-13A1.5 1.5 0 0 1 4 17.5v-9Z" />
+      <circle cx="12" cy="13" r="3.2" />
+    </symbol>
+    <symbol id="ico-archive" viewBox="0 0 24 24">
+      <rect x="3" y="4" width="18" height="4.5" rx="1" />
+      <path d="M5 8.5V18.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V8.5" />
+      <line x1="9.5" y1="13" x2="14.5" y2="13" />
+    </symbol>
+    <symbol id="ico-shield" viewBox="0 0 24 24">
+      <path d="M12 3l7.5 3v5.5c0 4.6-3.1 8.1-7.5 9.5-4.4-1.4-7.5-4.9-7.5-9.5V6L12 3Z" />
+      <line x1="12" y1="8.5" x2="12" y2="13" />
+      <line x1="12" y1="16" x2="12.01" y2="16" />
+    </symbol>
+    <symbol id="ico-copy" viewBox="0 0 24 24">
+      <rect x="9" y="9" width="11" height="11" rx="1.5" />
+      <path d="M5 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V5" />
+    </symbol>
   </svg>
 
   <a class="skip-link" href="#main-content" data-i18n="skip.main">Skip to content</a>
@@ -523,6 +541,7 @@
 
                   <div class="stage-links">
                     <span class="loader-summary-pill tabular" id="play-loader-summary">0 mods · 0 shaders</span>
+                    <span class="loader-summary-pill tabular" id="play-playtime-pill" hidden></span>
                     <button class="btn-subtle btn-sm" type="button" id="btn-play-open-library">
                       <svg class="ico small" aria-hidden="true"><use href="#ico-cube" /></svg>
                       <span data-i18n="nav.library">Library</span>
@@ -530,10 +549,14 @@
                     <button class="btn-subtle btn-sm" type="button" id="btn-goto-worlds" data-i18n="play.manageSaves">
                       Manage saves
                     </button>
+                    <button class="btn-subtle btn-sm" type="button" id="btn-play-crash-doctor">
+                      <svg class="ico small" aria-hidden="true"><use href="#ico-shield" /></svg>
+                      <span data-i18n="crash.btnLabel">Crash Doctor</span>
+                    </button>
                   </div>
                 </div>
 
-                <div class="stage-character" aria-label="Active character">
+                <div class="stage-character" aria-label="Active character" data-i18n-aria="play.characterAria">
                   <div class="stage-pedestal" id="play-skin-stage" title="Tracks cursor · Drag to rotate" data-i18n-title="play.skin3dHint">
                     <canvas id="play-skin-canvas" width="260" height="310" aria-label="Active player skin" data-i18n-aria="skin.previewAria"></canvas>
                   </div>
@@ -551,6 +574,7 @@
               </div>
             </section>
 
+            <div id="crash-doctor-host" aria-live="polite" hidden></div>
             <pre class="gradle-log-box tabular" id="gradle-log-box" hidden></pre>
 
             <div class="stage-lower">
@@ -578,7 +602,7 @@
               </section>
 
               <aside class="stage-side">
-                <div class="play-tuning-strip" aria-label="Quick tuning">
+                <div class="play-tuning-strip" aria-label="Quick tuning" data-i18n-aria="play.tuningAria">
                   <button class="play-tune-tile" type="button" id="btn-play-tune-jvm">
                     <span class="play-tune-k" data-i18n="play.specRam">JVM Memory &amp; GC</span>
                     <strong class="play-tune-v tabular" id="play-tune-ram">4096 MB · ZGC</strong>
@@ -631,7 +655,7 @@
         <section class="view" id="view-library" data-view="library" aria-labelledby="library-heading" hidden>
           <div class="view-head">
             <div>
-              <p class="eyebrow" data-i18n="library.kicker">MODRINTH LIBRARY &amp; LOADERS</p>
+              <p class="eyebrow" data-i18n="library.kicker">02 / MODRINTH LIBRARY &amp; LOADERS</p>
               <h1 id="library-heading" data-i18n="library.title">Mods, Shaders &amp; Packs</h1>
             </div>
             <p class="view-lead" data-i18n="library.subtitle">
@@ -640,7 +664,7 @@
           </div>
 
           <div class="library-toolbar-top">
-            <div class="library-tabs" role="tablist" aria-label="Library categories">
+            <div class="library-tabs" role="tablist" aria-label="Library categories" data-i18n-aria="library.tabsAria">
               <button class="lib-tab active" type="button" role="tab" aria-selected="true" data-lib-tab="mod" data-i18n="library.tabMods">Mods</button>
               <button class="lib-tab" type="button" role="tab" aria-selected="false" data-lib-tab="shader" data-i18n="library.tabShaders">Shaders</button>
               <button class="lib-tab" type="button" role="tab" aria-selected="false" data-lib-tab="resourcePack" data-i18n="library.tabPacks">Resource Packs</button>
@@ -699,7 +723,7 @@
                 </button>
                 <button class="btn-secondary btn-sm" type="button" id="btn-import-zip">
                   <svg class="ico small" aria-hidden="true"><use href="#ico-upload" /></svg>
-                  <span data-i18n="library.importZipBtn">Import ZIP</span>
+                  <span id="lib-import-zip-label" data-i18n="library.importShaderZipBtn">Import Shader ZIP</span>
                 </button>
               </div>
             </article>
@@ -713,9 +737,10 @@
                 autocomplete="off"
                 placeholder="Search Modrinth..."
                 aria-label="Search Modrinth"
+                data-i18n-aria="library.searchAria"
               />
             </div>
-            <select id="library-sort-select" aria-label="Sort results">
+            <select id="library-sort-select" aria-label="Sort results" data-i18n-aria="library.sortAria">
               <option value="downloads" data-i18n="library.sortDownloads">Most Downloaded</option>
               <option value="relevance" data-i18n="library.sortRelevance">Best Match</option>
               <option value="follows" data-i18n="library.sortFollows">Most Followed</option>
@@ -728,23 +753,33 @@
           <div class="library-catalog-grid" id="library-catalog-grid"></div>
 
           <div class="library-installed-panel" id="library-installed-panel" hidden>
-            <div class="library-installed-filters">
-              <button class="installed-sub-tab active" type="button" data-installed-kind="mod" data-i18n="library.tabMods">Mods</button>
-              <button class="installed-sub-tab" type="button" data-installed-kind="shader" data-i18n="library.tabShaders">Shaders</button>
-              <button class="installed-sub-tab" type="button" data-installed-kind="resourcePack" data-i18n="library.tabPacks">Resource Packs</button>
+            <div class="gallery-toolbar">
+              <div class="library-installed-filters">
+                <button class="installed-sub-tab active" type="button" data-installed-kind="mod" data-i18n="library.tabMods">Mods</button>
+                <button class="installed-sub-tab" type="button" data-installed-kind="shader" data-i18n="library.tabShaders">Shaders</button>
+                <button class="installed-sub-tab" type="button" data-installed-kind="resourcePack" data-i18n="library.tabPacks">Resource Packs</button>
+              </div>
+              <div class="row-actions">
+                <button class="btn-secondary btn-sm" type="button" id="btn-lib-check-updates">
+                  <svg class="ico small" aria-hidden="true"><use href="#ico-refresh" /></svg>
+                  <span id="lib-check-updates-label" data-i18n="library.checkUpdatesBtn">Check updates</span>
+                </button>
+                <button class="btn-primary btn-sm" type="button" id="btn-lib-update-all" hidden></button>
+              </div>
             </div>
             <div class="library-installed-list" id="library-installed-list"></div>
           </div>
         </section>
 
-        <!-- 03 / SAVES (MINECRAFT SAVES) -->
+        <!-- 03 / SAVES (MINECRAFT SAVES & SCREENSHOTS) -->
         <section class="view" id="view-worlds" data-view="worlds" aria-labelledby="worlds-heading" hidden>
           <div class="view-head">
             <div>
-              <p class="eyebrow" data-i18n="worlds.eyebrow">02 / MINECRAFT RUN/SAVES</p>
+              <p class="eyebrow" data-i18n="worlds.eyebrow">03 / MINECRAFT RUN/SAVES</p>
               <h1 id="worlds-heading" data-i18n="worlds.heading">Saved worlds</h1>
             </div>
             <div class="view-head-actions">
+              <span class="loader-summary-pill tabular" id="worlds-playtime-pill" hidden></span>
               <span class="count-label tabular" id="worlds-count-label">0 saves</span>
               <button class="btn-secondary btn-sm" type="button" id="btn-refresh-worlds">
                 <svg class="ico small" aria-hidden="true"><use href="#ico-refresh" /></svg>
@@ -756,42 +791,76 @@
             </div>
           </div>
 
-          <div class="worlds-toolbar">
-            <div class="field-group">
-              <label for="worlds-filter-input" data-i18n="worlds.filterLabel">Filter worlds by name</label>
-              <input
-                id="worlds-filter-input"
-                type="search"
-                autocomplete="off"
-                placeholder="e.g. Survival, İzmir, Skyblock"
-                data-i18n-placeholder="worlds.filterPlaceholder"
-              />
-            </div>
-            <div class="field-group">
-              <label for="worlds-sort-select" data-i18n="worlds.sortLabel">Sort order</label>
-              <select id="worlds-sort-select">
-                <option value="recent" data-i18n="worlds.sortRecent">Last saved (newest)</option>
-                <option value="name" data-i18n="worlds.sortName">World name (A–Z)</option>
-                <option value="size" data-i18n="worlds.sortSize">Size (largest)</option>
-              </select>
-            </div>
-            <div class="field-group submit-cell">
-              <button class="btn-subtle btn-sm" type="button" id="btn-clear-world-filter" data-i18n="worlds.clearFilter" hidden>
-                Clear filter
+          <div class="gallery-toolbar">
+            <div class="library-tabs" id="worlds-subtabs" role="tablist" aria-label="Worlds and screenshots" data-i18n-aria="worlds.tabsAria">
+              <button class="lib-tab active" type="button" role="tab" aria-selected="true" data-worlds-tab="saves" data-i18n="worlds.tabSaves">Saved Worlds</button>
+              <button class="lib-tab" type="button" role="tab" aria-selected="false" data-worlds-tab="screenshots">
+                <span data-i18n="worlds.tabScreenshots">Screenshots</span>
+                <span class="lib-tab-count tabular" id="screenshots-count-badge">0</span>
               </button>
             </div>
           </div>
 
-          <div class="state-banner" id="worlds-state-banner" role="status" aria-live="polite" hidden></div>
+          <div id="worlds-saves-panel">
+            <div class="worlds-toolbar">
+              <div class="field-group">
+                <label for="worlds-filter-input" data-i18n="worlds.filterLabel">Filter worlds by name</label>
+                <input
+                  id="worlds-filter-input"
+                  type="search"
+                  autocomplete="off"
+                  placeholder="e.g. Survival, İzmir, Skyblock"
+                  data-i18n-placeholder="worlds.filterPlaceholder"
+                />
+              </div>
+              <div class="field-group">
+                <label for="worlds-sort-select" data-i18n="worlds.sortLabel">Sort order</label>
+                <select id="worlds-sort-select">
+                  <option value="recent" data-i18n="worlds.sortRecent">Last saved (newest)</option>
+                  <option value="name" data-i18n="worlds.sortName">World name (A–Z)</option>
+                  <option value="size" data-i18n="worlds.sortSize">Size (largest)</option>
+                </select>
+              </div>
+              <div class="field-group submit-cell">
+                <button class="btn-subtle btn-sm" type="button" id="btn-clear-world-filter" data-i18n="worlds.clearFilter" hidden>
+                  Clear filter
+                </button>
+              </div>
+            </div>
 
-          <div class="worlds-list" id="worlds-list" role="list" aria-label="Minecraft world saves" data-i18n-aria="worlds.listAria"></div>
+            <div class="state-banner" id="worlds-state-banner" role="status" aria-live="polite" hidden></div>
+
+            <div class="worlds-list" id="worlds-list" role="list" aria-label="Minecraft world saves" data-i18n-aria="worlds.listAria"></div>
+          </div>
+
+          <div id="worlds-screenshots-panel" hidden>
+            <div class="gallery-toolbar">
+              <span class="count-label tabular" id="screenshots-toolbar-count">0 screenshots</span>
+              <div class="row-actions">
+                <button class="btn-secondary btn-sm" type="button" id="btn-refresh-screenshots">
+                  <svg class="ico small" aria-hidden="true"><use href="#ico-refresh" /></svg>
+                  <span data-i18n="worlds.refresh">Refresh</span>
+                </button>
+                <button class="btn-secondary btn-sm" type="button" id="btn-open-screenshots-folder">
+                  <svg class="ico small" aria-hidden="true"><use href="#ico-folder" /></svg>
+                  <span data-i18n="gallery.openFolderBtn">Open folder</span>
+                </button>
+              </div>
+            </div>
+            <div class="gallery-empty" id="screenshots-empty" hidden>
+              <svg class="ico" aria-hidden="true"><use href="#ico-camera" /></svg>
+              <strong data-i18n="gallery.emptyTitle">No screenshots found yet</strong>
+              <p class="muted-copy" data-i18n="gallery.emptyDesc">Press F2 in Minecraft to capture moments — they will appear automatically in this gallery.</p>
+            </div>
+            <div class="gallery-grid" id="screenshots-grid" role="list" aria-label="Screenshots" data-i18n-aria="worlds.tabScreenshots"></div>
+          </div>
         </section>
 
-        <!-- 03 / PROFILE & SKIN -->
+        <!-- 04 / PROFILE & SKIN -->
         <section class="view" id="view-profile" data-view="profile" aria-labelledby="profile-heading" hidden>
           <div class="view-head">
             <div>
-              <p class="eyebrow" data-i18n="profile.eyebrow">03 / IDENTITY &amp; SKIN</p>
+              <p class="eyebrow" data-i18n="profile.eyebrow">04 / IDENTITY &amp; SKIN</p>
               <h1 id="profile-heading" data-i18n="profile.heading">Profile &amp; skin</h1>
             </div>
             <p class="view-lead" data-i18n="profile.lead">
@@ -865,7 +934,8 @@
                     id="skin-atlas-canvas"
                     width="240"
                     height="240"
-                    aria-label="64x64 skin UV atlas"
+                    aria-label="64×64 skin UV atlas"
+                    data-i18n-aria="skin.atlasAria"
                     hidden
                   ></canvas>
                   <div class="skin-view-modes" role="group" aria-label="Skin camera angle" data-i18n-aria="skin.viewAria">
@@ -904,11 +974,11 @@
           </div>
         </section>
 
-        <!-- 04 / SETTINGS (GENERAL, MINECRAFT, VERSION & NETWORK) -->
+        <!-- 05 / SETTINGS (GENERAL, MINECRAFT, VERSION & NETWORK) -->
         <section class="view" id="view-system" data-view="system" aria-labelledby="system-heading" hidden>
           <div class="view-head">
             <div>
-              <p class="eyebrow" data-i18n="system.eyebrow">04 / APPLICATION, MINECRAFT &amp; SYSTEM</p>
+              <p class="eyebrow" data-i18n="system.eyebrow">05 / APPLICATION, MINECRAFT &amp; SYSTEM</p>
               <h1 id="system-heading" data-i18n="system.heading">Settings</h1>
             </div>
             <div class="view-head-actions">
@@ -920,7 +990,7 @@
 
           <div class="inline-notice" id="hardware-optimize-notice" aria-live="polite" hidden></div>
 
-          <div class="settings-nav-bar" role="tablist" aria-label="Settings sections">
+          <div class="settings-nav-bar" role="tablist" aria-label="Settings sections" data-i18n-aria="system.tabsAria">
             <button class="settings-tab active" type="button" role="tab" aria-selected="true" data-settings-tab="general">
               <svg class="ico small" aria-hidden="true"><use href="#ico-sliders" /></svg>
               <span data-i18n="system.tabGeneral">General</span>
@@ -1051,6 +1121,10 @@
                     <svg class="ico small" aria-hidden="true"><use href="#ico-gamepad" /></svg>
                     <span data-i18n="general.consoleAction">Open Fullscreen Console</span>
                   </button>
+                  <button class="btn-secondary btn-sm" type="button" id="btn-general-copy-diag">
+                    <svg class="ico small" aria-hidden="true"><use href="#ico-copy" /></svg>
+                    <span data-i18n="diag.copyBtn">Copy Diagnostics</span>
+                  </button>
                   <button class="btn-subtle btn-sm" type="button" id="btn-general-github">
                     <svg class="ico small" aria-hidden="true"><use href="#ico-code" /></svg>
                     <span data-i18n="rail.github">GitHub</span>
@@ -1075,7 +1149,7 @@
                         <label for="gfx-render-dist" data-i18n="system.renderDist">Render distance</label>
                       </div>
                       <div class="setting-row-control range-wrap">
-                        <input id="gfx-render-dist" type="range" min="4" max="32" step="1" title="Minecraft renderDistance (chunks)" data-i18n-title="system.renderDistTitle" />
+                        <input id="gfx-render-dist" type="range" min="2" max="32" step="1" title="Minecraft renderDistance (chunks)" data-i18n-title="system.renderDistTitle" />
                         <output class="tabular" id="gfx-render-dist-out">12</output>
                       </div>
                     </div>
@@ -1085,7 +1159,7 @@
                         <label for="gfx-sim-dist" data-i18n="system.simDist">Simulation distance</label>
                       </div>
                       <div class="setting-row-control range-wrap">
-                        <input id="gfx-sim-dist" type="range" min="5" max="24" step="1" title="Active entity & redstone simulation radius" data-i18n-title="system.simDistTitle" />
+                        <input id="gfx-sim-dist" type="range" min="5" max="32" step="1" title="Active entity & redstone simulation radius" data-i18n-title="system.simDistTitle" />
                         <output class="tabular" id="gfx-sim-dist-out">10</output>
                       </div>
                     </div>
@@ -1095,7 +1169,7 @@
                         <label for="gfx-fov" data-i18n="system.fov">Field of view (FOV)</label>
                       </div>
                       <div class="setting-row-control range-wrap">
-                        <input id="gfx-fov" type="range" min="50" max="110" step="1" title="Minecraft field of view (30 - 110 degrees)" data-i18n-title="system.fovTitle" />
+                        <input id="gfx-fov" type="range" min="30" max="110" step="1" title="Minecraft field of view (30 - 110 degrees)" data-i18n-title="system.fovTitle" />
                         <output class="tabular" id="gfx-fov-out">75°</output>
                       </div>
                     </div>
@@ -1264,10 +1338,10 @@
                     </div>
                     <div class="setting-row-control">
                       <select id="pref-dl-threads">
-                        <option value="8">8 Threads</option>
-                        <option value="16">16 Threads</option>
-                        <option value="24" selected>24 Threads (Default)</option>
-                        <option value="32">32 Threads (Max)</option>
+                        <option value="8" data-i18n="turbo.threads8">8 Threads</option>
+                        <option value="16" data-i18n="turbo.threads16">16 Threads</option>
+                        <option value="24" selected data-i18n="turbo.threads24">24 Threads (Default)</option>
+                        <option value="32" data-i18n="turbo.threads32">32 Threads (Max)</option>
                       </select>
                     </div>
                   </div>
@@ -1307,6 +1381,10 @@
               <div class="panel-card">
                 <div class="section-head">
                   <h2 data-i18n="servers.title">Local servers</h2>
+                  <button class="btn-subtle btn-sm" type="button" id="btn-ping-all-servers">
+                    <svg class="ico small" aria-hidden="true"><use href="#ico-refresh" /></svg>
+                    <span data-i18n="servers.pingAllBtn">Ping all</span>
+                  </button>
                 </div>
                 <p class="muted-copy muted-compact" data-i18n="servers.note" hidden>
                   Queries and joins offline-mode (online-mode=false) servers. Servers requiring EncryptionRequest are never bypassed.
@@ -1594,6 +1672,56 @@
       <div class="dialog-actions">
         <button class="btn-secondary" type="button" id="delete-dialog-cancel" data-i18n="worlds.deleteCancel">Cancel</button>
         <button class="btn-danger" type="button" id="delete-dialog-confirm" data-i18n="worlds.deleteConfirm">Delete permanently</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="restore-backup-dialog" aria-labelledby="restore-dialog-title" aria-describedby="restore-dialog-desc">
+    <div class="dialog-panel">
+      <div class="dialog-head">
+        <span class="eyebrow" data-i18n="worlds.restoreEyebrow">RESTORE SNAPSHOT</span>
+        <button class="btn-icon" type="button" id="restore-dialog-close" aria-label="Close confirmation dialog" data-i18n-aria="worlds.deleteCloseAria">
+          <svg class="ico small" aria-hidden="true"><use href="#ico-close" /></svg>
+        </button>
+      </div>
+      <h2 id="restore-dialog-title" data-i18n="worlds.restoreTitle">Restore world from backup?</h2>
+      <p id="restore-dialog-desc"></p>
+      <div class="dialog-actions">
+        <button class="btn-secondary" type="button" id="restore-dialog-cancel" data-i18n="worlds.deleteCancel">Cancel</button>
+        <button class="btn-primary" type="button" id="restore-dialog-confirm" data-i18n="worlds.restoreConfirm">Restore backup</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="gallery-lightbox" id="gallery-lightbox" aria-label="Screenshot viewer" data-i18n-aria="gallery.lightboxAria">
+    <div class="gallery-lightbox-frame">
+      <div class="gallery-lightbox-head">
+        <div class="gallery-lightbox-title">
+          <strong id="lightbox-name"></strong>
+          <span id="lightbox-meta" class="tabular"></span>
+        </div>
+        <button class="btn-icon" type="button" id="btn-lightbox-close" aria-label="Close viewer" data-i18n-aria="gallery.closeAria">
+          <svg class="ico small" aria-hidden="true"><use href="#ico-close" /></svg>
+        </button>
+      </div>
+      <div class="gallery-lightbox-stage">
+        <button class="gallery-lightbox-nav gallery-lightbox-nav--prev" type="button" id="btn-lightbox-prev" aria-label="Previous screenshot" data-i18n-aria="gallery.prevAria">
+          <span aria-hidden="true">‹</span>
+        </button>
+        <img id="lightbox-img" alt="" />
+        <button class="gallery-lightbox-nav gallery-lightbox-nav--next" type="button" id="btn-lightbox-next" aria-label="Next screenshot" data-i18n-aria="gallery.nextAria">
+          <span aria-hidden="true">›</span>
+        </button>
+      </div>
+      <div class="gallery-lightbox-foot">
+        <span class="count-label tabular" id="lightbox-counter"></span>
+        <div class="row-actions">
+          <button class="btn-secondary btn-sm" type="button" id="btn-lightbox-folder">
+            <svg class="ico small" aria-hidden="true"><use href="#ico-folder" /></svg>
+            <span data-i18n="gallery.openFolderBtn">Open folder</span>
+          </button>
+          <button class="btn-danger btn-sm" type="button" id="btn-lightbox-delete" data-i18n="gallery.deleteBtn">Delete</button>
+        </div>
       </div>
     </div>
   </dialog>

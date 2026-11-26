@@ -49,14 +49,50 @@ pub fn encode_ipc_frame(opcode: u32, json_payload: &str) -> Vec<u8> {
     frame
 }
 
-/// Builds the `SET_ACTIVITY` JSON payload for Discord IPC Opcode 1.
-pub fn build_activity_payload(
+/// Infers loader and Java runtime labels from `details` + `mc_version` when explicit labels are omitted.
+pub fn infer_loader_and_java_labels(mc_version: &str, details: &str) -> (&'static str, &'static str) {
+    let lower = details.to_ascii_lowercase();
+    let loader = if lower.contains("fabric") {
+        "Fabric"
+    } else if lower.contains("forge") {
+        "Forge"
+    } else {
+        "Vanilla"
+    };
+    let java = if loader == "Forge" && mc_version.trim() == "1.16.5" {
+        "Java 8/17"
+    } else if loader == "Forge"
+        && matches!(
+            mc_version.trim(),
+            "1.17.1" | "1.18.2" | "1.19.2" | "1.19.4" | "1.20" | "1.20.1" | "1.20.2" | "1.20.4"
+        )
+    {
+        "Java 17/21"
+    } else {
+        "Java 21"
+    };
+    (loader, java)
+}
+
+/// Builds the `SET_ACTIVITY` JSON payload for Discord IPC Opcode 1 with explicit loader/Java metadata.
+pub fn build_activity_payload_with_meta(
     pid: u32,
     details: &str,
     state_label: &str,
     started_epoch_secs: u64,
     mc_version: &str,
+    loader_label: Option<&str>,
+    java_label: Option<&str>,
 ) -> String {
+    let (inferred_loader, inferred_java) = infer_loader_and_java_labels(mc_version, details);
+    let loader = loader_label
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(inferred_loader);
+    let java = java_label
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(inferred_java);
     let payload = serde_json::json!({
         "cmd": "SET_ACTIVITY",
         "args": {
@@ -69,9 +105,9 @@ pub fn build_activity_payload(
                 },
                 "assets": {
                     "large_image": "basalt_logo",
-                    "large_text": format!("Basalt Launcher · Vanilla {mc_version}"),
+                    "large_text": format!("Basalt Launcher · {loader} {mc_version}"),
                     "small_image": "java21",
-                    "small_text": "Java 21 · IDM Turbo · Low-Ping"
+                    "small_text": format!("{java} · IDM Turbo · Low-Ping")
                 },
                 "buttons": [
                     {
@@ -88,6 +124,25 @@ pub fn build_activity_payload(
         "nonce": format!("basalt-{started_epoch_secs}-{pid}")
     });
     payload.to_string()
+}
+
+/// Builds the `SET_ACTIVITY` JSON payload for Discord IPC Opcode 1.
+pub fn build_activity_payload(
+    pid: u32,
+    details: &str,
+    state_label: &str,
+    started_epoch_secs: u64,
+    mc_version: &str,
+) -> String {
+    build_activity_payload_with_meta(
+        pid,
+        details,
+        state_label,
+        started_epoch_secs,
+        mc_version,
+        None,
+        None,
+    )
 }
 
 /// Builds the `SET_ACTIVITY` clear payload when Rich Presence is disabled.
@@ -119,6 +174,8 @@ struct DiscordUpdateReq {
     details: String,
     state_label: String,
     started_epoch_secs: u64,
+    loader_label: Option<String>,
+    java_label: Option<String>,
     discord_arc: Arc<Mutex<DiscordRpcStatus>>,
     seq: u64,
 }
@@ -135,12 +192,14 @@ fn discord_worker_sender() -> &'static mpsc::Sender<DiscordUpdateReq> {
                 while let Ok(newer) = rx.try_recv() {
                     latest = newer;
                 }
-                let updated = publish_discord_activity(
+                let updated = publish_discord_activity_with_meta(
                     latest.enabled,
                     &latest.mc_version,
                     &latest.details,
                     &latest.state_label,
                     latest.started_epoch_secs,
+                    latest.loader_label.as_deref(),
+                    latest.java_label.as_deref(),
                 );
                 if DISCORD_SEQ.load(std::sync::atomic::Ordering::SeqCst) == latest.seq
                     && let Ok(mut guard) = latest.discord_arc.lock()
@@ -162,6 +221,30 @@ pub fn queue_discord_activity_update(
     state_label: String,
     started_epoch_secs: u64,
 ) {
+    queue_discord_activity_update_with_meta(
+        discord_arc,
+        enabled,
+        mc_version,
+        details,
+        state_label,
+        started_epoch_secs,
+        None,
+        None,
+    );
+}
+
+/// Queues a non-blocking Discord Rich Presence update with explicit loader and Java labels.
+#[allow(clippy::too_many_arguments)]
+pub fn queue_discord_activity_update_with_meta(
+    discord_arc: Arc<Mutex<DiscordRpcStatus>>,
+    enabled: bool,
+    mc_version: String,
+    details: String,
+    state_label: String,
+    started_epoch_secs: u64,
+    loader_label: Option<String>,
+    java_label: Option<String>,
+) {
     let seq = DISCORD_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let _ = discord_worker_sender().send(DiscordUpdateReq {
         enabled,
@@ -169,9 +252,85 @@ pub fn queue_discord_activity_update(
         details,
         state_label,
         started_epoch_secs,
+        loader_label,
+        java_label,
         discord_arc,
         seq,
     });
+}
+
+#[cfg(windows)]
+fn pipe_bytes_available(file: &File) -> Option<usize> {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn PeekNamedPipe(
+            h_named_pipe: *mut core::ffi::c_void,
+            lp_buffer: *mut core::ffi::c_void,
+            n_buffer_size: u32,
+            lp_bytes_read: *mut u32,
+            lp_total_bytes_avail: *mut u32,
+            lp_bytes_left_this_message: *mut u32,
+        ) -> i32;
+    }
+    let mut avail: u32 = 0;
+    let ok = unsafe {
+        PeekNamedPipe(
+            file.as_raw_handle(),
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+            &mut avail,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok != 0 { Some(avail as usize) } else { None }
+}
+
+#[cfg(not(windows))]
+fn pipe_bytes_available(_file: &File) -> Option<usize> {
+    None
+}
+
+fn read_one_ipc_frame(pipe: &mut File) -> bool {
+    let mut hdr = [0u8; 8];
+    if pipe.read_exact(&mut hdr).is_err() {
+        return false;
+    }
+    let resp_len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+    if resp_len > 0 && resp_len <= 65536 {
+        let mut body = vec![0u8; resp_len];
+        return pipe.read_exact(&mut body).is_ok();
+    }
+    resp_len == 0
+}
+
+fn wait_and_read_ipc_frame(pipe: &mut File, max_wait_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(max_wait_ms);
+    loop {
+        match pipe_bytes_available(pipe) {
+            Some(avail) if avail >= 8 => return read_one_ipc_frame(pipe),
+            Some(_) => {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
+            None => return false,
+        }
+    }
+}
+
+fn drain_ipc_replies_nonblocking(pipe: &mut File) {
+    for _ in 0..8 {
+        match pipe_bytes_available(pipe) {
+            Some(avail) if avail >= 8 => {
+                if !read_one_ipc_frame(pipe) {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
 }
 
 /// Closes any open Discord IPC pipe cleanly so Rich Presence clears on launcher exit.
@@ -190,6 +349,27 @@ pub fn publish_discord_activity(
     state_label: &str,
     started_epoch_secs: u64,
 ) -> DiscordRpcStatus {
+    publish_discord_activity_with_meta(
+        enabled,
+        mc_version,
+        details,
+        state_label,
+        started_epoch_secs,
+        None,
+        None,
+    )
+}
+
+/// Sends a Discord Rich Presence update with explicit loader/Java labels and drains IPC replies safely.
+pub fn publish_discord_activity_with_meta(
+    enabled: bool,
+    mc_version: &str,
+    details: &str,
+    state_label: &str,
+    started_epoch_secs: u64,
+    loader_label: Option<&str>,
+    java_label: Option<&str>,
+) -> DiscordRpcStatus {
     let mut status = DiscordRpcStatus {
         enabled,
         connected: false,
@@ -202,7 +382,15 @@ pub fn publish_discord_activity(
 
     let pid = std::process::id();
     let activity_json = if enabled {
-        build_activity_payload(pid, details, state_label, started_epoch_secs, mc_version)
+        build_activity_payload_with_meta(
+            pid,
+            details,
+            state_label,
+            started_epoch_secs,
+            mc_version,
+            loader_label,
+            java_label,
+        )
     } else {
         build_clear_activity_payload(pid)
     };
@@ -214,15 +402,20 @@ pub fn publish_discord_activity(
 
     if !enabled {
         if let Some(ref mut existing) = *pipe_guard {
+            drain_ipc_replies_nonblocking(&mut existing.file);
             let _ = existing.file.write_all(&activity_frame);
             let _ = existing.file.flush();
+            let _ = wait_and_read_ipc_frame(&mut existing.file, 150);
         }
         *pipe_guard = None;
         return status;
     }
 
     if let Some(ref mut existing) = *pipe_guard {
+        drain_ipc_replies_nonblocking(&mut existing.file);
         if existing.file.write_all(&activity_frame).is_ok() && existing.file.flush().is_ok() {
+            let _ = wait_and_read_ipc_frame(&mut existing.file, 150);
+            drain_ipc_replies_nonblocking(&mut existing.file);
             status.connected = true;
             status.pipe_name = existing.label.clone();
             return status;
@@ -248,17 +441,13 @@ pub fn publish_discord_activity(
             continue;
         }
 
-        let mut hdr = [0u8; 8];
-        if pipe.read_exact(&mut hdr).is_err() {
+        if !wait_and_read_ipc_frame(&mut pipe, 1200) {
             continue;
-        }
-        let resp_len = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
-        if resp_len > 0 && resp_len <= 65536 {
-            let mut body = vec![0u8; resp_len];
-            let _ = pipe.read_exact(&mut body);
         }
 
         if pipe.write_all(&activity_frame).is_ok() && pipe.flush().is_ok() {
+            let _ = wait_and_read_ipc_frame(&mut pipe, 200);
+            drain_ipc_replies_nonblocking(&mut pipe);
             status.connected = true;
             status.pipe_name = pipe_label.clone();
             *pipe_guard = Some(PersistentPipe {
@@ -293,5 +482,27 @@ mod tests {
         assert!(payload.contains("SET_ACTIVITY"));
         assert!(payload.contains("https://github.com/Markesrrr/Basalt"));
         assert!(payload.contains("Singleplayer · Survival"));
+
+        let fabric_payload = build_activity_payload(
+            4242,
+            "Playing Minecraft 1.21.4 (Fabric)",
+            "In-Game · Player",
+            1700000000,
+            "1.21.4",
+        );
+        assert!(fabric_payload.contains("Basalt Launcher · Fabric 1.21.4"));
+        assert!(!fabric_payload.contains("Vanilla 1.21.4"));
+
+        let forge_1_16 = build_activity_payload_with_meta(
+            4242,
+            "Playing Minecraft 1.16.5 (Forge)",
+            "In-Game · Player",
+            1700000000,
+            "1.16.5",
+            Some("Forge"),
+            Some("Java 8"),
+        );
+        assert!(forge_1_16.contains("Basalt Launcher · Forge 1.16.5"));
+        assert!(forge_1_16.contains("Java 8 · IDM Turbo · Low-Ping"));
     }
 }

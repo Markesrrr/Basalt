@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod config;
+pub mod crash_doctor;
 pub mod discord_rpc;
 pub mod hardware;
 pub mod loaders;
@@ -7,5 +8,7 @@ pub mod modrinth;
 pub mod options_txt;
 pub mod protocol;
 pub mod saves;
+pub mod screenshots;
 pub mod sounds;
+pub mod stats;
 pub mod vanilla;

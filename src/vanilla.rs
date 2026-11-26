@@ -792,6 +792,28 @@ pub fn check_file_size_and_sha1(path: &Path, expected_size: u64, expected_sha1: 
         .is_ok_and(|actual| actual.eq_ignore_ascii_case(expected_sha1))
 }
 
+fn natives_dir_populated(natives_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(natives_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
+            return true;
+        }
+        if path.is_dir()
+            && !entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("META-INF")
+            && natives_dir_populated(&path)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn check_vanilla_client_ready_for(vanilla_dir: &Path, version: &str) -> bool {
     let Some(manifest) = load_cached_version_manifest_for(vanilla_dir, version) else {
         return false;
@@ -812,6 +834,7 @@ pub fn check_vanilla_client_ready_for(vanilla_dir: &Path, version: &str) -> bool
     }
     let os_name = current_mojang_os_name();
     let arch = current_mojang_arch();
+    let mut requires_natives = false;
     for lib in &manifest.libraries {
         if !is_library_allowed_for_target(&lib.name, &lib.rules, os_name, arch) {
             continue;
@@ -829,6 +852,7 @@ pub fn check_vanilla_client_ready_for(vanilla_dir: &Path, version: &str) -> bool
         if let Some(nat) = native_classifier_for_library(lib, os_name)
             && let Some(ref rel) = nat.path
         {
+            requires_natives = true;
             let p = vanilla_dir
                 .join("libraries")
                 .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
@@ -836,6 +860,9 @@ pub fn check_vanilla_client_ready_for(vanilla_dir: &Path, version: &str) -> bool
                 return false;
             }
         }
+    }
+    if requires_natives && !natives_dir_populated(&vanilla_dir.join("natives").join(version)) {
+        return false;
     }
     true
 }
@@ -2103,7 +2130,15 @@ pub fn build_jvm_base_args(
     args.push(format!("-Xmx{max_mb}M"));
     args.push(format!("-Xms{init_mb}M"));
 
-    match cfg.graphics.jvm_gc {
+    let java_major = parse_java_major(&cfg.java_home)
+        .map(|(m, _)| m)
+        .unwrap_or(21);
+    let effective_gc = match cfg.graphics.jvm_gc {
+        JvmGcMode::ZGC if java_major >= 17 => JvmGcMode::ZGC,
+        _ => JvmGcMode::G1GC,
+    };
+
+    match effective_gc {
         JvmGcMode::G1GC => {
             args.extend([
                 "-XX:+UseG1GC".to_string(),
@@ -2115,9 +2150,6 @@ pub fn build_jvm_base_args(
             ]);
         }
         JvmGcMode::ZGC => {
-            let java_major = parse_java_major(&cfg.java_home)
-                .map(|(m, _)| m)
-                .unwrap_or(21);
             args.push("-XX:+UseZGC".to_string());
             // -XX:+ZGenerational is required on JDK 21-22 for generational ZGC, deprecated on 23, removed on 24+.
             if (21..=22).contains(&java_major) {
@@ -2378,6 +2410,41 @@ pub fn spawn_java_client(
         let _ = fs::remove_file(p);
     }
     res
+}
+
+fn remove_argfiles_in_dir(dir: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("basalt-launch-") && name.ends_with(".args") {
+            let p = entry.path();
+            if p.is_file() && fs::remove_file(&p).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Removes stale `basalt-launch-*.args` files from `root_dir`, `root_dir/run`, and Forge profile directories.
+pub fn cleanup_stale_launch_argfiles(root_dir: &Path) -> usize {
+    let mut removed = 0usize;
+    removed += remove_argfiles_in_dir(root_dir);
+    removed += remove_argfiles_in_dir(&root_dir.join("run"));
+
+    let forge_profiles = resolve_vanilla_dir(root_dir).join("profiles").join("forge");
+    if let Ok(entries) = fs::read_dir(&forge_profiles) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                removed += remove_argfiles_in_dir(&p);
+            }
+        }
+    }
+    removed
 }
 
 /// Spawns Vanilla Minecraft directly with `java.exe` (no Gradle/Fabric intermediary).
@@ -3118,6 +3185,127 @@ mod tests {
         assert!(is_valid_asset_sha1(&"a".repeat(40)));
         assert_eq!(pack_format_for_mc_version(Some("1.16.5")), (6, false));
         assert_eq!(pack_format_for_mc_version(Some("1.21.4")), (46, true));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn zgc_falls_back_to_g1gc_on_legacy_jdks_and_cleans_argfiles_and_checks_natives() {
+        let tmp = std::env::temp_dir().join(format!(
+            "basalt_vanilla_phase2_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let j8 = tmp.join("jdk-8");
+        let j11 = tmp.join("jdk-11");
+        let j17 = tmp.join("jdk-17");
+        fs::create_dir_all(&j8).unwrap();
+        fs::create_dir_all(&j11).unwrap();
+        fs::create_dir_all(&j17).unwrap();
+        fs::write(j8.join("release"), "JAVA_VERSION=\"1.8.0_412\"\n").unwrap();
+        fs::write(j11.join("release"), "JAVA_VERSION=\"11.0.22\"\n").unwrap();
+        fs::write(j17.join("release"), "JAVA_VERSION=\"17.0.10\"\n").unwrap();
+
+        let vanilla_dir = tmp.join("vanilla");
+        let run_dir = tmp.join("run");
+        fs::create_dir_all(&vanilla_dir).unwrap();
+        fs::create_dir_all(&run_dir).unwrap();
+
+        let manifest = MojangVersionManifest {
+            id: "1.16.5".to_string(),
+            main_class: "net.minecraft.client.main.Main".to_string(),
+            asset_index: MojangAssetIndexInfo {
+                id: "1.16".to_string(),
+                sha1: "0".repeat(40),
+                size: 10,
+                url: String::new(),
+            },
+            downloads: MojangVersionDownloads {
+                client: MojangArtifactInfo {
+                    path: None,
+                    sha1: "0".repeat(40),
+                    size: 5,
+                    url: String::new(),
+                },
+            },
+            logging: None,
+            libraries: vec![],
+        };
+        let gfx = GraphicsSettings {
+            jvm_ram_mb: 3072,
+            jvm_gc: JvmGcMode::ZGC,
+            ..Default::default()
+        };
+
+        for jdk in [&j8, &j11] {
+            let args = build_vanilla_launch_args(
+                &vanilla_dir,
+                &run_dir,
+                &manifest,
+                &VanillaLaunchConfig {
+                    username: "Player".to_string(),
+                    player_uuid: "a01e3843-e521-3998-958a-f459800e4d11".to_string(),
+                    graphics: gfx.clone(),
+                    quick_play_singleplayer: None,
+                    quick_play_multiplayer: None,
+                    java_home: jdk.clone(),
+                    network_boost: false,
+                    process_boost: false,
+                },
+            );
+            assert!(args.contains(&"-XX:+UseG1GC".to_string()));
+            assert!(!args.contains(&"-XX:+UseZGC".to_string()));
+        }
+
+        let args_17 = build_vanilla_launch_args(
+            &vanilla_dir,
+            &run_dir,
+            &manifest,
+            &VanillaLaunchConfig {
+                username: "Player".to_string(),
+                player_uuid: "a01e3843-e521-3998-958a-f459800e4d11".to_string(),
+                graphics: gfx,
+                quick_play_singleplayer: None,
+                quick_play_multiplayer: None,
+                java_home: j17,
+                network_boost: false,
+                process_boost: false,
+            },
+        );
+        assert!(args_17.contains(&"-XX:+UseZGC".to_string()));
+        assert!(!args_17.contains(&"-XX:+ZGenerational".to_string()));
+
+        // check_vanilla_client_ready_for must require extracted native files when native classifiers exist
+        let ver_dir = vanilla_dir.join("versions").join("1.16.5");
+        fs::create_dir_all(&ver_dir).unwrap();
+        fs::write(ver_dir.join("1.16.5.jar"), b"12345").unwrap();
+        let nat_rel = "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar";
+        let nat_jar = vanilla_dir.join("libraries").join(nat_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        fs::create_dir_all(nat_jar.parent().unwrap()).unwrap();
+        fs::write(&nat_jar, b"nativejar").unwrap();
+        let os_key = match super::current_mojang_os_name() {
+            "windows" => "natives-windows",
+            "osx" => "natives-macos",
+            _ => "natives-linux",
+        };
+        let manifest_json = format!(
+            r#"{{"id":"1.16.5","mainClass":"net.minecraft.client.main.Main","assetIndex":{{"id":"1.16","sha1":"0","size":10,"url":"u"}},"downloads":{{"client":{{"sha1":"0","size":5,"url":"u"}}}},"libraries":[{{"name":"org.lwjgl:lwjgl:3.2.2","downloads":{{"classifiers":{{"{os_key}":{{"sha1":"0","size":9,"url":"u","path":"{nat_rel}"}}}}}}}}]}}"#
+        );
+        fs::write(ver_dir.join("1.16.5.json"), manifest_json).unwrap();
+        assert!(!super::check_vanilla_client_ready_for(&vanilla_dir, "1.16.5"));
+
+        let natives_dir = vanilla_dir.join("natives").join("1.16.5");
+        fs::create_dir_all(&natives_dir).unwrap();
+        fs::write(natives_dir.join("lwjgl.dll"), b"dll").unwrap();
+        assert!(super::check_vanilla_client_ready_for(&vanilla_dir, "1.16.5"));
+
+        // cleanup_stale_launch_argfiles removes only basalt-launch-*.args
+        fs::write(run_dir.join("basalt-launch-1234.args"), b"-Xmx4096M").unwrap();
+        fs::write(run_dir.join("keep.txt"), b"keep").unwrap();
+        let removed = super::cleanup_stale_launch_argfiles(&tmp);
+        assert_eq!(removed, 1);
+        assert!(!run_dir.join("basalt-launch-1234.args").exists());
+        assert!(run_dir.join("keep.txt").is_file());
 
         let _ = fs::remove_dir_all(&tmp);
     }

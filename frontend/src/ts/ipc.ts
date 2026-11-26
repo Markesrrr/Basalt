@@ -6,6 +6,7 @@ import type {
   BootstrapDto,
   ClientOptimizationReport,
   CornerStyle,
+  CrashDiagnosis,
   GraphicsSettings,
   ImportLibraryDto,
   InstallActionDto,
@@ -21,9 +22,11 @@ import type {
   MinecraftSoundsDto,
   ModrinthSearchHit,
   ModrinthSearchResponse,
+  ModUpdateInfo,
   OptimizeResultDto,
   RunningSessionDto,
   SavedServer,
+  ScreenshotItem,
   ServerPingInfo,
   SessionEndedPayload,
   SkinModel,
@@ -34,6 +37,7 @@ import type {
   UiLanguage,
   VanillaEnvStatus,
   VersionChangeDto,
+  WorldBackupSummary,
 } from "./types";
 
 export function isTauriRuntime(): boolean {
@@ -77,6 +81,76 @@ function makeSampleSkinRgba(): number[] {
   paintRect(16, 48, 16, 16, 42, 48, 58);
   return out;
 }
+
+function makeProceduralPngDataUrl(
+  width: number,
+  height: number,
+  palette: [string, string, string, string]
+): string | null {
+  if (typeof document === "undefined") return null;
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    const sky = ctx.createLinearGradient(0, 0, 0, height);
+    sky.addColorStop(0, palette[0]);
+    sky.addColorStop(0.62, palette[1]);
+    sky.addColorStop(1, palette[2]);
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, width, height);
+    // Stylized voxel horizon hills
+    ctx.fillStyle = palette[2];
+    const cols = 12;
+    const step = width / cols;
+    for (let i = 0; i < cols; i += 1) {
+      const h = height * (0.24 + ((i * 37) % 5) * 0.06);
+      ctx.fillRect(Math.floor(i * step), Math.floor(height - h), Math.ceil(step) + 1, Math.ceil(h));
+    }
+    ctx.fillStyle = palette[3];
+    ctx.fillRect(Math.floor(width * 0.72), Math.floor(height * 0.16), Math.max(8, Math.floor(width * 0.1)), Math.max(8, Math.floor(width * 0.1)));
+    return canvas.toDataURL("image/png");
+  } catch {
+    return null;
+  }
+}
+
+const PREVIEW_WORLD_ICON = makeProceduralPngDataUrl(64, 64, ["#263248", "#3d556e", "#2d6a4f", "#e07d44"]);
+const PREVIEW_SERVER_FAVICON = makeProceduralPngDataUrl(64, 64, ["#1c212b", "#2d3748", "#e07d44", "#f6c177"]);
+
+const previewBackupsStore: Record<string, WorldBackupSummary[]> = {
+  "Survival (Sample)": [
+    {
+      filename: "Survival__Sample__20261124_194210.zip",
+      save_id: "Survival (Sample)",
+      created_epoch_secs: 1_763_118_000,
+      size_bytes: 1_640_200,
+      file_count: 28,
+    },
+  ],
+};
+
+let previewScreenshotsStore: Array<ScreenshotItem & { palette: [string, string, string, string] }> = [
+  {
+    filename: "2026-11-24_20.14.08.png",
+    size_bytes: 1_248_500,
+    modified_epoch_secs: 1_763_122_000,
+    width: 1920,
+    height: 1080,
+    palette: ["#1f293d", "#3c5070", "#2f5d50", "#e9965c"],
+  },
+  {
+    filename: "2026-11-22_18.42.19.png",
+    size_bytes: 982_120,
+    modified_epoch_secs: 1_762_950_000,
+    width: 1920,
+    height: 1080,
+    palette: ["#2d1b2e", "#5b3256", "#2b2538", "#f4a261"],
+  },
+];
+
+let previewUpdatedProjects = new Set<string>();
 
 // Isolated browser-preview sample data (only used outside Tauri desktop runtime)
 const previewState: BootstrapDto = {
@@ -127,6 +201,15 @@ const previewState: BootstrapDto = {
       id: "Survival (Sample)",
       modified_epoch_secs: 1_763_120_000,
       size_bytes: 2_450_000,
+      icon_data_url: PREVIEW_WORLD_ICON,
+      backup_count: 1,
+    },
+    {
+      id: "Redstone Lab",
+      modified_epoch_secs: 1_762_840_000,
+      size_bytes: 940_000,
+      icon_data_url: null,
+      backup_count: 0,
     },
   ],
   hardware: {
@@ -175,7 +258,7 @@ const previewState: BootstrapDto = {
     enabled: true,
     connected: false,
     pipe_name: "Standby (WebRTC/IPC)",
-    details: "Minecraft 1.21.4 (Vanilla)",
+    details: "Minecraft 1.21.4 (Fabric)",
     state_label: "Basalt Launcher · Player",
     started_epoch_secs: 1_763_120_000,
     github_url: "https://github.com/Markesrrr/Basalt",
@@ -184,6 +267,23 @@ const previewState: BootstrapDto = {
   skin_is_slim: true,
   running_session: null,
   hardware_notice: null,
+  player_uuid: "a01e3843-e521-3998-958a-f459800e4d11",
+  playtime_stats: {
+    total_playtime_secs: 14_820,
+    total_sessions: 9,
+    per_world: {
+      "Survival (Sample)": {
+        playtime_secs: 11_280,
+        sessions: 7,
+        last_played_epoch_secs: 1_763_120_000,
+      },
+      "Redstone Lab": {
+        playtime_secs: 3_540,
+        sessions: 2,
+        last_played_epoch_secs: 1_762_840_000,
+      },
+    },
+  },
 };
 
 async function loadBrowserPreviewDefaultSkinRgba(): Promise<number[] | null> {
@@ -625,18 +725,29 @@ export async function installModrinthItem(params: {
   const list = (previewLibraryStore[key] ??= []);
   const hit = PREVIEW_CATALOG.find((c) => c.projectId === params.projectId || c.slug === params.projectId);
   const ext = params.kind === "mod" ? ".jar" : ".zip";
-  const fileName = `${hit?.slug ?? params.projectId}-1.21.4${ext}`;
-  if (!list.some((item) => item.projectId === params.projectId || item.fileName === fileName)) {
-    list.push({
-      fileName,
-      displayName: fileName.replace(/\.(jar|zip)$/, ""),
-      kind: params.kind,
-      enabled: true,
-      sizeBytes: 1_048_576,
-      path: fileName,
-      projectId: hit?.projectId ?? params.projectId,
-    });
+  const resolvedProjectId = hit?.projectId ?? params.projectId;
+  const isUpdate = list.some((item) => item.projectId === resolvedProjectId);
+  const fileName = isUpdate
+    ? `${hit?.slug ?? params.projectId}-latest+mc${previewState.config.mc_version}${ext}`
+    : `${hit?.slug ?? params.projectId}-${previewState.config.mc_version}${ext}`;
+  const existingIdx = list.findIndex(
+    (item) => item.projectId === resolvedProjectId || item.fileName === fileName
+  );
+  const entry: InstalledLibraryItem = {
+    fileName,
+    displayName: fileName.replace(/\.(jar|zip)$/, ""),
+    kind: params.kind,
+    enabled: existingIdx >= 0 ? list[existingIdx].enabled : true,
+    sizeBytes: 1_195_200,
+    path: fileName,
+    projectId: resolvedProjectId,
+  };
+  if (existingIdx >= 0) {
+    list[existingIdx] = entry;
+  } else {
+    list.push(entry);
   }
+  previewUpdatedProjects.add(resolvedProjectId);
   previewState.library_counts = computePreviewCounts();
   return {
     config: structuredClone(previewState.config),
@@ -782,6 +893,7 @@ export async function optimizeClientNow(): Promise<ClientOptimizationReport> {
       "-XX:MaxInlineLevel=15",
       "Win32:ABOVE_NORMAL_PRIORITY",
     ],
+    config: structuredClone(previewState.config),
   };
 }
 
@@ -898,9 +1010,166 @@ export async function pingServerCmd(address: string): Promise<ServerPingInfo> {
   if (isTauriRuntime()) {
     return invoke<ServerPingInfo>("ping_server_cmd", { address });
   }
+  const clean = address.trim().toLowerCase();
+  if (clean.startsWith("127.0.0.1") || clean.startsWith("localhost")) {
+    return {
+      address: address.trim(),
+      version_name: `Paper ${previewState.config.mc_version}`,
+      protocol_version: 769,
+      online_players: 3,
+      max_players: 20,
+      description: "Basalt Local Dev SMP — Offline development world ready!",
+      latency_ms: 14,
+      favicon: PREVIEW_SERVER_FAVICON,
+    };
+  }
   throw new Error(
-    `Local TCP SLP query is unavailable in browser preview (${address}). Use the desktop app.`
+    `Server unreachable in browser preview (${address}).`
   );
+}
+
+export async function listWorldBackups(saveId: string): Promise<WorldBackupSummary[]> {
+  if (isTauriRuntime()) {
+    return invoke<WorldBackupSummary[]>("list_world_backups", { saveId });
+  }
+  return structuredClone(previewBackupsStore[saveId] ?? []);
+}
+
+export async function createWorldBackup(saveId: string): Promise<WorldBackupSummary> {
+  if (isTauriRuntime()) {
+    return invoke<WorldBackupSummary>("create_world_backup", { saveId });
+  }
+  const save = previewState.saves.find((s) => s.id === saveId);
+  const nowSecs = Math.floor(Date.now() / 1000);
+  const safeStem = saveId.replace(/[^A-Za-z0-9_-]+/g, "_");
+  const entry: WorldBackupSummary = {
+    filename: `${safeStem}_${nowSecs}.zip`,
+    save_id: saveId,
+    created_epoch_secs: nowSecs,
+    size_bytes: Math.max(48_000, Math.round((save?.size_bytes ?? 512_000) * 0.68)),
+    file_count: 24,
+  };
+  const list = (previewBackupsStore[saveId] ??= []);
+  list.unshift(entry);
+  if (save) {
+    save.backup_count = list.length;
+  }
+  return structuredClone(entry);
+}
+
+export async function restoreWorldBackup(backupFilename: string): Promise<MinecraftSaveSummary> {
+  if (isTauriRuntime()) {
+    return invoke<MinecraftSaveSummary>("restore_world_backup", { backupFilename });
+  }
+  for (const [saveId, list] of Object.entries(previewBackupsStore)) {
+    const found = list.find((b) => b.filename === backupFilename);
+    if (found) {
+      const save = previewState.saves.find((s) => s.id === saveId);
+      if (save) {
+        save.modified_epoch_secs = Math.floor(Date.now() / 1000);
+        return structuredClone(save);
+      }
+    }
+  }
+  throw new Error("Backup snapshot not found.");
+}
+
+export async function deleteWorldBackup(backupFilename: string): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke<void>("delete_world_backup", { backupFilename });
+    return;
+  }
+  for (const [saveId, list] of Object.entries(previewBackupsStore)) {
+    const next = list.filter((b) => b.filename !== backupFilename);
+    if (next.length !== list.length) {
+      previewBackupsStore[saveId] = next;
+      const save = previewState.saves.find((s) => s.id === saveId);
+      if (save) save.backup_count = next.length;
+      return;
+    }
+  }
+}
+
+export async function diagnoseLastCrash(): Promise<CrashDiagnosis | null> {
+  if (isTauriRuntime()) {
+    return invoke<CrashDiagnosis | null>("diagnose_last_crash");
+  }
+  return {
+    code: "out_of_memory",
+    severity: "critical",
+    offending_mod: null,
+    details: "java.lang.OutOfMemoryError: Java heap space while loading chunk meshes (sample preview diagnosis).",
+    suggested_action: "Increase JVM Memory (-Xmx) to 4096 MB or 6144 MB in Game & JVM settings.",
+    log_excerpt: [
+      "[21:14:03] [Render thread/ERROR]: Unhandled game exception",
+      "java.lang.OutOfMemoryError: Java heap space",
+      "    at net.minecraft.client.renderer.SectionBufferBuilderPool.allocate(SectionBufferBuilderPool.java:42)",
+    ],
+    crash_report_path: null,
+  };
+}
+
+export async function listScreenshots(): Promise<ScreenshotItem[]> {
+  if (isTauriRuntime()) {
+    return invoke<ScreenshotItem[]>("list_screenshots");
+  }
+  return previewScreenshotsStore.map(({ filename, size_bytes, modified_epoch_secs, width, height }) => ({
+    filename,
+    size_bytes,
+    modified_epoch_secs,
+    width,
+    height,
+  }));
+}
+
+export async function readScreenshotDataUrl(filename: string): Promise<string> {
+  if (isTauriRuntime()) {
+    return invoke<string>("read_screenshot_data_url", { filename });
+  }
+  const found = previewScreenshotsStore.find((s) => s.filename === filename);
+  const url = makeProceduralPngDataUrl(640, 360, found?.palette ?? ["#1f293d", "#3c5070", "#2f5d50", "#e9965c"]);
+  if (!url) throw new Error("Canvas preview unavailable.");
+  return url;
+}
+
+export async function deleteScreenshot(filename: string): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke<void>("delete_screenshot", { filename });
+    return;
+  }
+  previewScreenshotsStore = previewScreenshotsStore.filter((s) => s.filename !== filename);
+}
+
+export async function openScreenshotsFolder(): Promise<void> {
+  if (isTauriRuntime()) {
+    await invoke<void>("open_screenshots_folder");
+  }
+}
+
+export async function checkLibraryUpdates(
+  kind: LibraryKind,
+  loader: LoaderKind
+): Promise<ModUpdateInfo[]> {
+  if (isTauriRuntime()) {
+    return invoke<ModUpdateInfo[]>("check_library_updates", { kind, loader });
+  }
+  if (kind === "mod" && loader === "Fabric" && !previewUpdatedProjects.has("AANobbMI")) {
+    const items = previewLibraryStore["mod:Fabric"] ?? [];
+    const sodium = items.find((it) => it.projectId === "AANobbMI");
+    if (sodium) {
+      return [
+        {
+          filename: sodium.fileName,
+          project_id: "AANobbMI",
+          title: "Sodium",
+          current_version: "0.6.5+mc1.21.4",
+          latest_version: "0.6.13+mc1.21.4",
+          latest_version_id: "preview-sodium-latest",
+        },
+      ];
+    }
+  }
+  return [];
 }
 
 export async function probeLocalServerCmd(
