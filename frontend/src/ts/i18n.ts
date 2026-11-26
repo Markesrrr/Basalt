@@ -544,7 +544,7 @@ export const TRANSLATIONS: Record<UiLanguage, Record<string, string>> = {
     "discord.githubTitle": "Open Basalt GitHub repository",
     "discord.gameDirTitle": "Open local Minecraft run/ directory",
     "discord.statusConnected": "Connected",
-    "discord.statusStandby": "Active",
+    "discord.statusStandby": "Waiting for Discord",
     "discord.statusDisabled": "Off",
 
     "profile.sessionCardTitle": "Offline session & runtime",
@@ -1148,7 +1148,7 @@ export const TRANSLATIONS: Record<UiLanguage, Record<string, string>> = {
     "discord.githubTitle": "Basalt GitHub sayfasını aç",
     "discord.gameDirTitle": "Yerel Minecraft run/ klasörünü aç",
     "discord.statusConnected": "Bağlı",
-    "discord.statusStandby": "Aktif",
+    "discord.statusStandby": "Discord bekleniyor",
     "discord.statusDisabled": "Kapalı",
 
     "profile.sessionCardTitle": "Çevrimdışı oturum ve çalışma durumu",
@@ -1752,7 +1752,7 @@ export const TRANSLATIONS: Record<UiLanguage, Record<string, string>> = {
     "discord.githubTitle": "Basalt-GitHub-Repository öffnen",
     "discord.gameDirTitle": "Lokales Minecraft-Verzeichnis (run/) öffnen",
     "discord.statusConnected": "Verbunden",
-    "discord.statusStandby": "Aktiv",
+    "discord.statusStandby": "Warte auf Discord",
     "discord.statusDisabled": "Aus",
 
     "profile.sessionCardTitle": "Offline-Sitzung & Laufzeit",

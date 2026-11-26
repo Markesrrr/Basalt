@@ -7,6 +7,7 @@ import type {
   ClientOptimizationReport,
   CornerStyle,
   CrashDiagnosis,
+  DiscordRpcStatus,
   GraphicsSettings,
   ImportLibraryDto,
   InstallActionDto,
@@ -1333,6 +1334,17 @@ export async function onSessionEnded(
 ): Promise<() => void> {
   if (isTauriRuntime()) {
     return listen<SessionEndedPayload>("basalt://session-ended", (event) => {
+      cb(event.payload);
+    });
+  }
+  return () => {};
+}
+
+export async function onDiscordStatus(
+  cb: (status: DiscordRpcStatus) => void
+): Promise<() => void> {
+  if (isTauriRuntime()) {
+    return listen<DiscordRpcStatus>("basalt://discord-status", (event) => {
       cb(event.payload);
     });
   }

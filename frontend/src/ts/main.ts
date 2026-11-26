@@ -2786,10 +2786,13 @@ function renderProfileView(): void {
   const rpcBadge = byId<HTMLSpanElement>("discord-status-badge");
   if (!config.discord_rpc) {
     rpcBadge.textContent = tr(lang, "discord.statusDisabled");
+    rpcBadge.dataset.state = "disabled";
   } else if (rpc?.connected) {
     rpcBadge.textContent = tr(lang, "discord.statusConnected");
+    rpcBadge.dataset.state = "connected";
   } else {
     rpcBadge.textContent = tr(lang, "discord.statusStandby");
+    rpcBadge.dataset.state = "standby";
   }
 
   byId<HTMLSpanElement>("skin-resolved-badge").textContent = tr(
@@ -5878,6 +5881,12 @@ async function init(): Promise<void> {
 
   await ipc.onLaunchLog((payload) => {
     appendLogLine(payload.line, payload.is_err);
+  });
+
+  await ipc.onDiscordStatus((rpcStatus) => {
+    if (!state) return;
+    state.discord_rpc_status = rpcStatus;
+    renderProfileView();
   });
 
   await ipc.onSessionEnded((payload) => {

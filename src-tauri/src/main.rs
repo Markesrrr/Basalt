@@ -19,8 +19,10 @@ use basalt::config::{
     AccentTone, AppConfig, AppPaths, CornerStyle, GraphicsSettings, LayoutMode, LoaderKind,
     SavedServer, SkinModel, ThemeMode, UiLanguage, normalize_hex_color, normalize_mc_version,
 };
+use basalt::crash_doctor::{CrashDiagnosis, diagnose_crash};
 use basalt::discord_rpc::{
-    BASALT_GITHUB_URL, DiscordRpcStatus, queue_discord_activity_update, shutdown_discord_rpc,
+    BASALT_GITHUB_URL, DiscordRpcStatus, queue_discord_activity_update,
+    set_discord_status_listener, shutdown_discord_rpc,
 };
 use basalt::hardware::HardwareProfile;
 use basalt::loaders::{
@@ -29,28 +31,42 @@ use basalt::loaders::{
     spawn_modded_client, sync_profile_shared_files,
 };
 use basalt::modrinth::{
-    InstallOutcome, InstalledLibraryItem, LibraryCounts, LibraryKind, ModrinthSearchResponse,
-    count_library_items, delete_library_item, import_library_file, install_modrinth_project,
+    InstallOutcome, InstalledLibraryItem, LibraryCounts, LibraryKind, ModUpdateInfo,
+    ModrinthSearchResponse, check_library_updates as scan_library_updates, count_library_items,
+    delete_library_item, import_library_file, install_modrinth_project,
     install_shader_preset_bundle, list_library_items, search_modrinth, toggle_library_item,
 };
 use basalt::options_txt::{
     ensure_launch_options, read_minecraft_options_into, sync_minecraft_options,
 };
 use basalt::protocol::{
-    LocalHandshakeResult, ServerPingInfo, ping_server_1_21_4, probe_local_dev_login_1_21_4,
+    LocalHandshakeResult, ServerPingInfo, local_player_uuid_bytes, ping_server_for_version,
+    probe_local_dev_login_for_version, protocol_version_for_mc,
 };
-use basalt::saves::{MinecraftSaveSummary, delete_save as remove_save_dir, list_saves as scan_saves, resolve_save_dir};
+use basalt::saves::{
+    MinecraftSaveSummary, WorldBackupSummary, create_world_backup as make_world_backup,
+    default_world_backups_dir, delete_save as remove_save_dir,
+    delete_world_backup as remove_world_backup, list_saves_with_backups,
+    list_world_backups as scan_world_backups, resolve_save_dir,
+    restore_world_backup as apply_world_backup,
+};
+use basalt::screenshots::{
+    ScreenshotItem, delete_screenshot as remove_screenshot, list_screenshots as scan_screenshots,
+    read_screenshot_data_url as load_screenshot_data_url, screenshots_dir,
+};
 use basalt::sounds::{
     MinecraftSoundsDto, default_local_asset_roots, fetch_missing_minecraft_sounds,
     load_local_minecraft_sounds,
 };
+use basalt::stats::{PlaytimeStatsDto, load_playtime_stats, record_playtime_session};
 use basalt::vanilla::{
     BASALT_SKIN_PACK_NAME, ClientOptimizationReport, CurlCapabilities, VanillaEnvStatus,
-    VanillaLaunchConfig, compute_file_sha256_hex, discover_java_for_loader,
-    ensure_vanilla_version_ready_with_threads,
-    inspect_vanilla_environment_for_version, migrate_legacy_client_gradle_saves, resolve_curl_exe,
-    resolve_tar_exe, resolve_vanilla_dir, run_client_and_network_optimization, spawn_vanilla_client,
-    summarize_process_failure, write_basalt_skin_resource_pack_for,
+    VanillaLaunchConfig, align_uuid_for_skin_model, cleanup_stale_launch_argfiles,
+    compute_file_sha256_hex, discover_java_for_loader, ensure_vanilla_version_ready_with_threads,
+    format_uuid_dashed, inspect_vanilla_environment_for_version,
+    migrate_legacy_client_gradle_saves, resolve_curl_exe, resolve_tar_exe, resolve_vanilla_dir,
+    run_client_and_network_optimization, spawn_vanilla_client, summarize_process_failure,
+    write_basalt_skin_resource_pack_for,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +87,8 @@ struct BootstrapDto {
     discord_rpc_status: DiscordRpcStatus,
     skin_rgba: Vec<u8>,
     skin_is_slim: bool,
+    player_uuid: String,
+    playtime_stats: PlaytimeStatsDto,
     running_session: Option<RunningSessionDto>,
     hardware_notice: Option<String>,
 }
@@ -111,6 +129,15 @@ struct SessionEndedPayload {
     vanilla: VanillaEnvStatus,
     loader_status: LoaderEnvStatus,
     library_counts: LibraryCounts,
+    diagnosis: Option<CrashDiagnosis>,
+    playtime_stats: Option<PlaytimeStatsDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OptimizeClientResponseDto {
+    #[serde(flatten)]
+    report: ClientOptimizationReport,
+    config: AppConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,6 +251,7 @@ impl AppState {
     fn initialize() -> Result<Self, String> {
         let paths = AppPaths::resolve();
         paths.ensure_dirs()?;
+        let _ = cleanup_stale_launch_argfiles(&paths.root_dir);
 
         let vanilla_dir = resolve_vanilla_dir(&paths.root_dir);
         fs::create_dir_all(&vanilla_dir)
@@ -265,7 +293,11 @@ impl AppState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let initial_details = format!("Minecraft {} (Vanilla)", config.mc_version);
+        let initial_details = format!(
+            "Minecraft {} ({})",
+            config.mc_version,
+            loader_display_name(config.mod_loader)
+        );
         let initial_state = format!("Basalt Launcher · {}", config.username);
         let discord = Arc::new(Mutex::new(DiscordRpcStatus {
             enabled: config.discord_rpc,
@@ -303,9 +335,35 @@ impl AppState {
         self.run_dir.join("saves")
     }
 
+    fn backups_dir(&self) -> PathBuf {
+        default_world_backups_dir(&self.run_dir)
+    }
+
+    fn stats_file(&self) -> PathBuf {
+        self.paths.root_dir.join("stats.json")
+    }
+
     fn run_dir(&self) -> PathBuf {
         self.run_dir.clone()
     }
+}
+
+fn compute_aligned_player_uuid(username: &str, skin_is_slim: bool) -> String {
+    let base = local_player_uuid_bytes(username);
+    let aligned = align_uuid_for_skin_model(base, skin_is_slim);
+    format_uuid_dashed(&aligned)
+}
+
+fn ensure_not_running(running: &Mutex<Option<RunningSessionDto>>, action: &str) -> Result<(), String> {
+    let guard = running
+        .lock()
+        .map_err(|_| "Failed to unlock session state".to_string())?;
+    if guard.is_some() {
+        return Err(format!(
+            "Cannot {action} while Minecraft or setup is running; wait or close the game first."
+        ));
+    }
+    Ok(())
 }
 
 fn validate_username(raw: &str) -> Result<String, String> {
@@ -424,9 +482,12 @@ fn emit_session_ended(
     kind: String,
     exit_code: Option<i32>,
     error: Option<String>,
+    diagnosis: Option<CrashDiagnosis>,
+    playtime_stats: Option<PlaytimeStatsDto>,
     dirs: &SessionDirs<'_>,
 ) {
-    let saves = scan_saves(dirs.saves).unwrap_or_default();
+    let backups_dir = default_world_backups_dir(dirs.run);
+    let saves = list_saves_with_backups(dirs.saves, &backups_dir).unwrap_or_default();
     let vanilla = inspect_vanilla_environment_for_version(
         dirs.vanilla,
         dirs.run,
@@ -445,6 +506,8 @@ fn emit_session_ended(
             vanilla,
             loader_status,
             library_counts,
+            diagnosis,
+            playtime_stats,
         },
     );
 }
@@ -493,7 +556,7 @@ fn monitor_vanilla_child_blocking(
     app: &tauri::AppHandle,
     mut child: Child,
     log_file: &Path,
-) -> (Option<i32>, Option<String>) {
+) -> (Option<i32>, Option<String>, Vec<String>) {
     let tail = Arc::new(Mutex::new(VecDeque::<String>::with_capacity(240)));
     if let Some(parent) = log_file.parent() {
         let _ = fs::create_dir_all(parent);
@@ -530,31 +593,32 @@ fn monitor_vanilla_child_blocking(
         let _ = w.flush();
     }
 
+    let captured: Vec<String> = tail
+        .lock()
+        .ok()
+        .map(|buf| buf.iter().cloned().collect())
+        .unwrap_or_default();
+
     match status_res {
         Ok(status) => {
             let code = status.code();
             if status.success() {
-                (code, None)
+                (code, None, captured)
             } else {
-                let captured: Vec<String> = tail
-                    .lock()
-                    .ok()
-                    .map(|buf| buf.iter().cloned().collect())
-                    .unwrap_or_default();
                 let msg = summarize_process_failure(
                     &captured,
                     code,
                     log_available.then_some(log_file),
                 );
-                (code, Some(msg))
+                (code, Some(msg), captured)
             }
         }
-        Err(e) => (None, Some(format!("Process monitor error: {e}"))),
+        Err(e) => (None, Some(format!("Process monitor error: {e}")), captured),
     }
 }
 
 #[tauri::command]
-fn get_bootstrap_state(state: tauri::State<AppState>) -> Result<BootstrapDto, String> {
+async fn get_bootstrap_state(state: tauri::State<'_, AppState>) -> Result<BootstrapDto, String> {
     let config = {
         let mut guard = state
             .config
@@ -580,27 +644,52 @@ fn get_bootstrap_state(state: tauri::State<AppState>) -> Result<BootstrapDto, St
         .lock()
         .map_err(|_| "Failed to unlock session state".to_string())?
         .clone();
-
-    let saves = scan_saves(&state.saves_dir())?;
-    let vanilla = inspect_vanilla_environment_for_version(
-        &state.vanilla_dir,
-        &state.run_dir,
-        Some(&state.paths.runtime_dir),
-        &config.mc_version,
-    );
-    let (loader_status, library_counts) = compute_loader_status_and_counts(
-        &state.vanilla_dir,
-        &state.run_dir,
-        &config.mc_version,
-        config.mod_loader,
-    );
     let discord_rpc_status = state
         .discord
         .lock()
         .map(|d| d.clone())
         .unwrap_or_default();
-    let skin_img = load_active_skin_image(config.skin_file.as_deref());
-    let skin_is_slim = resolve_skin_is_slim(config.skin_model, &skin_img);
+
+    let saves_dir = state.saves_dir();
+    let backups_dir = state.backups_dir();
+    let vanilla_dir = state.vanilla_dir.clone();
+    let run_dir = state.run_dir.clone();
+    let runtime_dir = state.paths.runtime_dir.clone();
+    let stats_file = state.stats_file();
+    let config_for_worker = config.clone();
+
+    let (saves, vanilla, loader_status, library_counts, skin_rgba, skin_is_slim, player_uuid, playtime_stats) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let saves = list_saves_with_backups(&saves_dir, &backups_dir)?;
+            let vanilla = inspect_vanilla_environment_for_version(
+                &vanilla_dir,
+                &run_dir,
+                Some(&runtime_dir),
+                &config_for_worker.mc_version,
+            );
+            let (loader_status, library_counts) = compute_loader_status_and_counts(
+                &vanilla_dir,
+                &run_dir,
+                &config_for_worker.mc_version,
+                config_for_worker.mod_loader,
+            );
+            let skin_img = load_active_skin_image(config_for_worker.skin_file.as_deref());
+            let skin_is_slim = resolve_skin_is_slim(config_for_worker.skin_model, &skin_img);
+            let player_uuid = compute_aligned_player_uuid(&config_for_worker.username, skin_is_slim);
+            let playtime_stats = load_playtime_stats(&stats_file);
+            Ok::<_, String>((
+                saves,
+                vanilla,
+                loader_status,
+                library_counts,
+                skin_img.into_raw(),
+                skin_is_slim,
+                player_uuid,
+                playtime_stats,
+            ))
+        })
+        .await
+        .map_err(|e| format!("Bootstrap inspection worker failed: {e}"))??;
 
     Ok(BootstrapDto {
         config,
@@ -610,8 +699,10 @@ fn get_bootstrap_state(state: tauri::State<AppState>) -> Result<BootstrapDto, St
         loader_status,
         library_counts,
         discord_rpc_status,
-        skin_rgba: skin_img.into_raw(),
+        skin_rgba,
         skin_is_slim,
+        player_uuid,
+        playtime_stats,
         running_session,
         hardware_notice,
     })
@@ -619,7 +710,7 @@ fn get_bootstrap_state(state: tauri::State<AppState>) -> Result<BootstrapDto, St
 
 #[tauri::command]
 fn list_saves(state: tauri::State<AppState>) -> Result<Vec<MinecraftSaveSummary>, String> {
-    scan_saves(&state.saves_dir())
+    list_saves_with_backups(&state.saves_dir(), &state.backups_dir())
 }
 
 #[tauri::command]
@@ -641,21 +732,11 @@ fn delete_save(
     state: tauri::State<AppState>,
     save_id: String,
 ) -> Result<Vec<MinecraftSaveSummary>, String> {
-    {
-        let running = state
-            .running
-            .lock()
-            .map_err(|_| "Failed to unlock session state".to_string())?;
-        if running.is_some() {
-            return Err(
-                "Cannot delete a world while Minecraft or setup is running; wait or close the game first.".to_string(),
-            );
-        }
-    }
+    ensure_not_running(&state.running, "delete a world")?;
 
     remove_save_dir(&state.saves_dir(), &save_id)?;
 
-    let saves = scan_saves(&state.saves_dir())?;
+    let saves = list_saves_with_backups(&state.saves_dir(), &state.backups_dir())?;
     let mut config = state
         .config
         .lock()
@@ -666,6 +747,106 @@ fn delete_save(
     }
 
     Ok(saves)
+}
+
+#[tauri::command]
+fn list_world_backups(
+    state: tauri::State<AppState>,
+    save_id: String,
+) -> Result<Vec<WorldBackupSummary>, String> {
+    scan_world_backups(&state.backups_dir(), &save_id)
+}
+
+#[tauri::command]
+async fn create_world_backup(
+    state: tauri::State<'_, AppState>,
+    save_id: String,
+) -> Result<WorldBackupSummary, String> {
+    ensure_not_running(&state.running, "back up a world")?;
+    let saves_dir = state.saves_dir();
+    let backups_dir = state.backups_dir();
+    tauri::async_runtime::spawn_blocking(move || make_world_backup(&saves_dir, &backups_dir, &save_id))
+        .await
+        .map_err(|e| format!("World backup worker failed: {e}"))?
+}
+
+#[tauri::command]
+async fn restore_world_backup(
+    state: tauri::State<'_, AppState>,
+    backup_filename: String,
+) -> Result<MinecraftSaveSummary, String> {
+    ensure_not_running(&state.running, "restore a world backup")?;
+    let saves_dir = state.saves_dir();
+    let backups_dir = state.backups_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        apply_world_backup(&saves_dir, &backups_dir, &backup_filename)
+    })
+    .await
+    .map_err(|e| format!("World restore worker failed: {e}"))?
+}
+
+#[tauri::command]
+fn delete_world_backup(
+    state: tauri::State<AppState>,
+    backup_filename: String,
+) -> Result<(), String> {
+    remove_world_backup(&state.backups_dir(), &backup_filename)
+}
+
+#[tauri::command]
+fn diagnose_last_crash(state: tauri::State<AppState>) -> Result<Option<CrashDiagnosis>, String> {
+    let log_file = state.paths.root_dir.join("logs").join("last-launch.log");
+    let log_lines: Vec<String> = fs::read_to_string(&log_file)
+        .ok()
+        .map(|raw| raw.lines().map(ToString::to_string).collect())
+        .unwrap_or_default();
+    let run_dir = state.run_dir();
+    let has_recent_report =
+        basalt::crash_doctor::find_recent_crash_report(&run_dir, Some(86_400)).is_some();
+    if log_lines.is_empty() && !has_recent_report {
+        return Ok(None);
+    }
+    Ok(Some(diagnose_crash(&log_lines, Some(&run_dir), Some(86_400))))
+}
+
+#[tauri::command]
+fn list_screenshots(state: tauri::State<AppState>) -> Result<Vec<ScreenshotItem>, String> {
+    scan_screenshots(&state.run_dir())
+}
+
+#[tauri::command]
+async fn read_screenshot_data_url(
+    state: tauri::State<'_, AppState>,
+    filename: String,
+) -> Result<String, String> {
+    let run_dir = state.run_dir();
+    tauri::async_runtime::spawn_blocking(move || load_screenshot_data_url(&run_dir, &filename))
+        .await
+        .map_err(|e| format!("Screenshot loader worker failed: {e}"))?
+}
+
+#[tauri::command]
+fn delete_screenshot(state: tauri::State<AppState>, filename: String) -> Result<(), String> {
+    remove_screenshot(&state.run_dir(), &filename)
+}
+
+#[tauri::command]
+fn open_screenshots_folder(state: tauri::State<AppState>) -> Result<(), String> {
+    let dir = screenshots_dir(&state.run_dir());
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to prepare screenshots directory {}: {e}", dir.display()))?;
+    #[cfg(windows)]
+    {
+        Command::new("explorer.exe")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open screenshots directory: {e}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err(format!("Screenshots directory: {}", dir.display()))
+    }
 }
 
 #[tauri::command]
@@ -706,7 +887,24 @@ fn save_profile_settings(
         config.mc_version = normalize_mc_version(ver);
     }
     config.save(&state.paths.config_file)?;
-    Ok(config.clone())
+    let snapshot = config.clone();
+    drop(config);
+
+    let details = format!(
+        "Minecraft {} ({})",
+        snapshot.mc_version,
+        loader_display_name(snapshot.mod_loader)
+    );
+    let state_label = format!("Basalt Launcher · {}", snapshot.username);
+    spawn_discord_sync(
+        Arc::clone(&state.discord),
+        snapshot.discord_rpc,
+        snapshot.mc_version.clone(),
+        details,
+        state_label,
+        state.started_epoch_secs,
+    );
+    Ok(snapshot)
 }
 
 fn build_version_change_dto(state: &AppState, config_snapshot: AppConfig) -> VersionChangeDto {
@@ -851,7 +1049,7 @@ async fn install_modrinth_item(
         &state.vanilla_dir,
         &state.run_dir,
         &config_snapshot.mc_version,
-        loader,
+        config_snapshot.mod_loader,
     );
     Ok(InstallActionDto {
         config: config_snapshot,
@@ -866,14 +1064,27 @@ async fn install_shader_bundle(
     state: tauri::State<'_, AppState>,
     preset_id: String,
 ) -> Result<InstallActionDto, String> {
+    struct BundleReservation<'a>(&'a Mutex<Option<RunningSessionDto>>);
+    impl Drop for BundleReservation<'_> {
+        fn drop(&mut self) {
+            finish_running_session(self.0);
+        }
+    }
+
     let target_loader = match preset_id.as_str() {
         "fabric_shaders" => LoaderKind::Fabric,
         "forge_shaders" => LoaderKind::Forge,
         _ => return Err(format!("Unsupported shader bundle '{preset_id}'")),
     };
-    if state.running.lock().is_ok_and(|guard| guard.is_some()) {
-        return Err("Another launch or verification task is already running.".to_string());
-    }
+    begin_running_session(
+        &state.running,
+        RunningSessionDto {
+            pid: std::process::id(),
+            kind: "prepare".to_string(),
+            label: format!("Shader Bundle ({})", loader_display_name(target_loader)),
+        },
+    )?;
+    let _reservation = BundleReservation(&state.running);
 
     let (mc_version, dl_threads) = {
         let config = state
@@ -910,6 +1121,19 @@ async fn install_shader_bundle(
         config.clone()
     };
 
+    spawn_discord_sync(
+        Arc::clone(&state.discord),
+        config_snapshot.discord_rpc,
+        config_snapshot.mc_version.clone(),
+        format!(
+            "Minecraft {} ({})",
+            config_snapshot.mc_version,
+            loader_display_name(config_snapshot.mod_loader)
+        ),
+        format!("Basalt Launcher · {}", config_snapshot.username),
+        state.started_epoch_secs,
+    );
+
     let (loader_status, library_counts) = compute_loader_status_and_counts(
         &state.vanilla_dir,
         &state.run_dir,
@@ -922,6 +1146,26 @@ async fn install_shader_bundle(
         loader_status,
         library_counts,
     })
+}
+
+#[tauri::command]
+async fn check_library_updates(
+    state: tauri::State<'_, AppState>,
+    kind: LibraryKind,
+    loader: LoaderKind,
+) -> Result<Vec<ModUpdateInfo>, String> {
+    let mc_version = state
+        .config
+        .lock()
+        .map(|c| c.mc_version.clone())
+        .unwrap_or_else(|_| "1.21.4".to_string());
+    let run_dir = state.run_dir.clone();
+    let vanilla_dir = state.vanilla_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_library_updates(&run_dir, &vanilla_dir, kind, loader, &mc_version)
+    })
+    .await
+    .map_err(|e| format!("Library update check worker failed: {e}"))?
 }
 
 #[tauri::command]
@@ -947,6 +1191,7 @@ fn toggle_library_item_cmd(
     loader: LoaderKind,
     file_name: String,
 ) -> Result<LibraryCounts, String> {
+    ensure_not_running(&state.running, "toggle library items")?;
     let config = state
         .config
         .lock()
@@ -964,7 +1209,7 @@ fn toggle_library_item_cmd(
         &state.vanilla_dir,
         &state.run_dir,
         &config.mc_version,
-        loader,
+        config.mod_loader,
     );
     Ok(counts)
 }
@@ -976,6 +1221,7 @@ fn delete_library_item_cmd(
     loader: LoaderKind,
     file_name: String,
 ) -> Result<LibraryCounts, String> {
+    ensure_not_running(&state.running, "delete library items")?;
     let config = state
         .config
         .lock()
@@ -993,7 +1239,7 @@ fn delete_library_item_cmd(
         &state.vanilla_dir,
         &state.run_dir,
         &config.mc_version,
-        loader,
+        config.mod_loader,
     );
     Ok(counts)
 }
@@ -1054,7 +1300,7 @@ async fn pick_and_import_library_file(
         &state.vanilla_dir,
         &state.run_dir,
         &config.mc_version,
-        loader,
+        config.mod_loader,
     );
     Ok(Some(ImportLibraryDto {
         file_name,
@@ -1136,9 +1382,15 @@ fn save_turbo_settings(
 #[tauri::command]
 async fn optimize_client_now(
     state: tauri::State<'_, AppState>,
-) -> Result<ClientOptimizationReport, String> {
-    let vanilla_dir = state.vanilla_dir.clone();
-    let (network_boost, process_boost) = {
+) -> Result<OptimizeClientResponseDto, String> {
+    let is_running = state.running.lock().is_ok_and(|g| g.is_some());
+    let vanilla_dir = if is_running {
+        // Avoid deleting active download staging files in vanilla/tmp while a session/download runs.
+        state.vanilla_dir.join(".running-skip-tmp")
+    } else {
+        state.vanilla_dir.clone()
+    };
+    let config_snapshot = {
         let mut config = state
             .config
             .lock()
@@ -1146,13 +1398,20 @@ async fn optimize_client_now(
         config.network_boost = true;
         config.process_boost = true;
         let _ = config.save(&state.paths.config_file);
-        (config.network_boost, config.process_boost)
+        config.clone()
     };
-    tauri::async_runtime::spawn_blocking(move || {
+    let network_boost = config_snapshot.network_boost;
+    let process_boost = config_snapshot.process_boost;
+    let report = tauri::async_runtime::spawn_blocking(move || {
         run_client_and_network_optimization(&vanilla_dir, network_boost, process_boost)
     })
     .await
-    .map_err(|e| format!("Optimization worker error: {e}"))
+    .map_err(|e| format!("Optimization worker error: {e}"))?;
+
+    Ok(OptimizeClientResponseDto {
+        report,
+        config: config_snapshot,
+    })
 }
 
 #[tauri::command]
@@ -1341,31 +1600,45 @@ fn save_graphics_settings(
 }
 
 #[tauri::command]
-fn auto_optimize_graphics(state: tauri::State<AppState>) -> Result<OptimizeResultDto, String> {
-    let hardware = HardwareProfile::detect_headless();
-    let mut hw_guard = state
-        .hardware
-        .lock()
-        .map_err(|_| "Failed to unlock hardware profile".to_string())?;
-    *hw_guard = hardware.clone();
-    drop(hw_guard);
+async fn auto_optimize_graphics(
+    state: tauri::State<'_, AppState>,
+) -> Result<OptimizeResultDto, String> {
+    let hardware = tauri::async_runtime::spawn_blocking(HardwareProfile::detect_headless)
+        .await
+        .map_err(|e| format!("Hardware detection worker failed: {e}"))?;
 
+    {
+        let mut hw_guard = state
+            .hardware
+            .lock()
+            .map_err(|_| "Failed to unlock hardware profile".to_string())?;
+        *hw_guard = hardware.clone();
+    }
+
+    let run_dir = state.run_dir();
+    let options_exists = run_dir.join("options.txt").is_file();
     let (recommended, reason) = {
         let mut config = state
             .config
             .lock()
             .map_err(|_| "Failed to unlock configuration".to_string())?;
-        let (mut recommended, reason) = hardware.recommend_settings(&config.graphics);
-        let options_path = state.run_dir().join("options.txt");
-        if options_path.is_file() {
-            read_minecraft_options_into(&state.run_dir(), &mut recommended);
-        }
+        let (mut recommended, base_reason) = hardware.recommend_settings(&config.graphics);
+        let final_reason = if options_exists {
+            // Preserve existing in-game options.txt video settings while applying JVM RAM/GC tuning.
+            read_minecraft_options_into(&run_dir, &mut recommended);
+            format!(
+                "Tuned JVM memory ({} MB, {:?}) while preserving your existing in-game options.txt settings. {base_reason}",
+                recommended.jvm_ram_mb, recommended.jvm_gc
+            )
+        } else {
+            base_reason
+        };
         config.graphics = recommended.clone();
         config.save(&state.paths.config_file)?;
-        (recommended, reason)
+        (recommended, final_reason)
     };
-    if !state.run_dir().join("options.txt").is_file() {
-        let _ = sync_minecraft_options(&state.run_dir(), &recommended);
+    if !options_exists {
+        let _ = sync_minecraft_options(&run_dir, &recommended);
     }
 
     Ok(OptimizeResultDto {
@@ -1527,40 +1800,58 @@ fn remove_server(
 }
 
 #[tauri::command]
-async fn ping_server_cmd(address: String) -> Result<ServerPingInfo, String> {
+async fn ping_server_cmd(
+    state: tauri::State<'_, AppState>,
+    address: String,
+) -> Result<ServerPingInfo, String> {
     let clean_addr = validate_server_address(&address)?;
-    tauri::async_runtime::spawn_blocking(move || ping_server_1_21_4(&clean_addr))
+    let mc_version = state
+        .config
+        .lock()
+        .map(|c| c.mc_version.clone())
+        .unwrap_or_else(|_| "1.21.4".to_string());
+    let protocol_ver = protocol_version_for_mc(&mc_version);
+    tauri::async_runtime::spawn_blocking(move || ping_server_for_version(&clean_addr, protocol_ver))
         .await
         .map_err(|e| format!("Ping worker thread error: {e}"))?
 }
 
 #[tauri::command]
 async fn probe_local_server_cmd(
+    state: tauri::State<'_, AppState>,
     address: String,
     username: String,
 ) -> Result<LocalHandshakeResult, String> {
     let clean_addr = validate_server_address(&address)?;
     let clean_user = validate_username(&username)?;
+    let mc_version = state
+        .config
+        .lock()
+        .map(|c| c.mc_version.clone())
+        .unwrap_or_else(|_| "1.21.4".to_string());
+    let protocol_ver = protocol_version_for_mc(&mc_version);
     tauri::async_runtime::spawn_blocking(move || {
-        probe_local_dev_login_1_21_4(&clean_addr, &clean_user)
+        probe_local_dev_login_for_version(&clean_addr, &clean_user, protocol_ver)
     })
     .await
     .map_err(|e| format!("Handshake worker thread error: {e}"))?
 }
 
 #[tauri::command]
-fn recheck_java_21(state: tauri::State<AppState>) -> Result<VanillaEnvStatus, String> {
+async fn recheck_java_21(state: tauri::State<'_, AppState>) -> Result<VanillaEnvStatus, String> {
     let ver = state
         .config
         .lock()
         .map(|c| c.mc_version.clone())
         .unwrap_or_else(|_| "1.21.4".to_string());
-    Ok(inspect_vanilla_environment_for_version(
-        &state.vanilla_dir,
-        &state.run_dir,
-        Some(&state.paths.runtime_dir),
-        &ver,
-    ))
+    let vanilla_dir = state.vanilla_dir.clone();
+    let run_dir = state.run_dir.clone();
+    let runtime_dir = state.paths.runtime_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_vanilla_environment_for_version(&vanilla_dir, &run_dir, Some(&runtime_dir), &ver)
+    })
+    .await
+    .map_err(|e| format!("Java inspection worker failed: {e}"))
 }
 
 #[tauri::command]
@@ -1869,6 +2160,8 @@ fn install_java_21(
                 "java-install".to_string(),
                 exit_code,
                 error,
+                None,
+                None,
                 &SessionDirs {
                     vanilla: &vanilla_dir,
                     run: &run_dir,
@@ -1979,6 +2272,8 @@ fn prepare_loader_environment(
             "prepare".to_string(),
             exit_code,
             error,
+            None,
+            None,
             &SessionDirs {
                 vanilla: &vanilla_dir,
                 run: &run_dir,
@@ -2148,6 +2443,7 @@ fn launch_client(
         started_epoch_secs,
     );
 
+    let quick_sp_for_stats = quick_sp.clone();
     let launch_cfg = VanillaLaunchConfig {
         username: config_snapshot.username,
         player_uuid,
@@ -2160,10 +2456,12 @@ fn launch_client(
     };
 
     let running_arc = Arc::clone(&state.running);
+    let root_dir = state.paths.root_dir.clone();
     let vanilla_dir = state.vanilla_dir.clone();
     let run_dir = state.run_dir.clone();
     let saves_dir = state.saves_dir();
     let runtime_dir = state.paths.runtime_dir.clone();
+    let stats_file = state.stats_file();
     let log_file = state.paths.root_dir.join("logs").join("last-launch.log");
 
     thread::spawn(move || {
@@ -2177,29 +2475,33 @@ fn launch_client(
             );
         };
 
-        let (exit_code, error) = match active_loader {
+        let mut session_duration_secs: Option<u64> = None;
+        let (exit_code, error, captured_logs) = match active_loader {
             LoaderKind::Vanilla => match ensure_vanilla_version_ready_with_threads(
                 &vanilla_dir,
                 &active_ver,
                 dl_threads,
                 log_emit,
             ) {
-                Err(err) => (Some(1), Some(err)),
+                Err(err) => (Some(1), Some(err.clone()), vec![err]),
                 Ok(manifest) => match spawn_vanilla_client(&vanilla_dir, &run_dir, &manifest, &launch_cfg) {
-                    Err(err) => (Some(1), Some(err)),
+                    Err(err) => (Some(1), Some(err.clone()), vec![err]),
                     Ok(child) => {
                         if let Ok(mut guard) = running_arc.lock()
                             && let Some(ref mut active) = *guard
                         {
                             active.pid = child.id();
                         }
-                        monitor_vanilla_child_blocking(&app, child, &log_file)
+                        let started = std::time::Instant::now();
+                        let res = monitor_vanilla_child_blocking(&app, child, &log_file);
+                        session_duration_secs = Some(started.elapsed().as_secs());
+                        res
                     }
                 },
             },
             LoaderKind::Fabric => {
                 match ensure_fabric_version_ready(&vanilla_dir, &active_ver, dl_threads, log_emit) {
-                    Err(err) => (Some(1), Some(err)),
+                    Err(err) => (Some(1), Some(err.clone()), vec![err]),
                     Ok((vanilla_manifest, overlay)) => match spawn_modded_client(
                         &vanilla_dir,
                         &run_dir,
@@ -2208,14 +2510,17 @@ fn launch_client(
                         &overlay,
                         &launch_cfg,
                     ) {
-                        Err(err) => (Some(1), Some(err)),
+                        Err(err) => (Some(1), Some(err.clone()), vec![err]),
                         Ok((child, _)) => {
                             if let Ok(mut guard) = running_arc.lock()
                                 && let Some(ref mut active) = *guard
                             {
                                 active.pid = child.id();
                             }
-                            monitor_vanilla_child_blocking(&app, child, &log_file)
+                            let started = std::time::Instant::now();
+                            let res = monitor_vanilla_child_blocking(&app, child, &log_file);
+                            session_duration_secs = Some(started.elapsed().as_secs());
+                            res
                         }
                     },
                 }
@@ -2227,7 +2532,7 @@ fn launch_client(
                 dl_threads,
                 log_emit,
             ) {
-                Err(err) => (Some(1), Some(err)),
+                Err(err) => (Some(1), Some(err.clone()), vec![err]),
                 Ok((vanilla_manifest, overlay)) => match spawn_modded_client(
                     &vanilla_dir,
                     &run_dir,
@@ -2236,14 +2541,16 @@ fn launch_client(
                     &overlay,
                     &launch_cfg,
                 ) {
-                    Err(err) => (Some(1), Some(err)),
+                    Err(err) => (Some(1), Some(err.clone()), vec![err]),
                     Ok((child, effective_game_dir)) => {
                         if let Ok(mut guard) = running_arc.lock()
                             && let Some(ref mut active) = *guard
                         {
                             active.pid = child.id();
                         }
+                        let started = std::time::Instant::now();
                         let res = monitor_vanilla_child_blocking(&app, child, &log_file);
+                        session_duration_secs = Some(started.elapsed().as_secs());
                         sync_profile_shared_files(&effective_game_dir, &run_dir);
                         res
                     }
@@ -2251,19 +2558,46 @@ fn launch_client(
             },
         };
 
+        let updated_playtime = session_duration_secs
+            .and_then(|secs| record_playtime_session(&stats_file, quick_sp_for_stats.as_deref(), secs).ok());
+
+        let failed = error.is_some() || exit_code.is_some_and(|code| code != 0);
+        let diagnosis = if failed {
+            Some(diagnose_crash(&captured_logs, Some(&run_dir), Some(600)))
+        } else {
+            None
+        };
+
+        let _ = cleanup_stale_launch_argfiles(&root_dir);
         finish_running_session(&running_arc);
-        if let Some(app_state) = app.try_state::<AppState>()
-            && let Ok(mut guard) = app_state.config.lock()
-            && read_minecraft_options_into(&run_dir, &mut guard.graphics)
-        {
-            let _ = guard.save(&app_state.paths.config_file);
-        }
+        let (live_discord_enabled, live_ver, live_loader, live_user) =
+            if let Some(app_state) = app.try_state::<AppState>()
+                && let Ok(mut guard) = app_state.config.lock()
+            {
+                if read_minecraft_options_into(&run_dir, &mut guard.graphics) {
+                    let _ = guard.save(&app_state.paths.config_file);
+                }
+                (
+                    guard.discord_rpc,
+                    guard.mc_version.clone(),
+                    guard.mod_loader,
+                    guard.username.clone(),
+                )
+            } else {
+                (
+                    discord_enabled,
+                    active_ver.clone(),
+                    active_loader,
+                    username_for_discord.clone(),
+                )
+            };
+        let live_loader_name = loader_display_name(live_loader);
         spawn_discord_sync(
             discord_arc,
-            discord_enabled,
-            active_ver.clone(),
-            format!("Minecraft {active_ver} ({loader_name})"),
-            format!("Basalt Launcher · {username_for_discord}"),
+            live_discord_enabled,
+            live_ver.clone(),
+            format!("Minecraft {live_ver} ({live_loader_name})"),
+            format!("Basalt Launcher · {live_user}"),
             started_epoch_secs,
         );
         emit_session_ended(
@@ -2271,13 +2605,15 @@ fn launch_client(
             "launch".to_string(),
             exit_code,
             error,
+            diagnosis,
+            updated_playtime,
             &SessionDirs {
                 vanilla: &vanilla_dir,
                 run: &run_dir,
                 saves: &saves_dir,
                 runtime: &runtime_dir,
-                version: &active_ver,
-                loader: active_loader,
+                version: &live_ver,
+                loader: live_loader,
             },
         );
     });
@@ -2355,12 +2691,22 @@ fn main() {
             list_saves,
             select_save,
             delete_save,
+            list_world_backups,
+            create_world_backup,
+            restore_world_backup,
+            delete_world_backup,
+            diagnose_last_crash,
+            list_screenshots,
+            read_screenshot_data_url,
+            delete_screenshot,
+            open_screenshots_folder,
             save_profile_settings,
             set_mc_version,
             set_mod_loader,
             search_modrinth_catalog,
             install_modrinth_item,
             install_shader_bundle,
+            check_library_updates,
             list_library_items_cmd,
             toggle_library_item_cmd,
             delete_library_item_cmd,
@@ -2397,6 +2743,10 @@ fn main() {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_title("Basalt — Minecraft Launcher (Unofficial)");
             }
+            let handle = app.handle().clone();
+            set_discord_status_listener(Arc::new(move |status| {
+                let _ = handle.emit("basalt://discord-status", &status);
+            }));
             Ok(())
         })
         .on_window_event(|_window, event| {

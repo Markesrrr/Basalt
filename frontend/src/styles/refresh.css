@@ -2607,3 +2607,44 @@ button.mod-update-pill:active:not(:disabled) {
     padding: 0.5rem 2.5rem;
   }
 }
+
+/* Settings card containment & Discord RPC state pill */
+.panel-card {
+  min-width: 0;
+}
+
+.kv-val {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.card-footer-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  max-width: 100%;
+  gap: 0.45rem 0.5rem;
+}
+
+.card-footer-actions.card-footer-split {
+  justify-content: space-between;
+}
+
+.card-footer-actions button {
+  max-width: 100%;
+}
+
+#discord-status-badge[data-state="connected"] {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--hairline));
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+#discord-status-badge[data-state="standby"] {
+  border-color: color-mix(in srgb, var(--warning) 40%, var(--hairline));
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text-muted);
+}
+
+#discord-status-badge[data-state="disabled"] {
+  opacity: 0.72;
+}
